@@ -429,6 +429,7 @@ func TestDispatchPlugins_SkipsManualGatePlugin(t *testing.T) {
 		t.Errorf("dog work = %q, want empty (manual-gate plugin must not auto-dispatch)", dg.Work)
 	}
 }
+
 func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
