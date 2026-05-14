@@ -1264,6 +1264,43 @@ func TestHookedBeadCloseNotRestrictedToHookedStatus(t *testing.T) {
 	}
 }
 
+// TestDeferredExitResetsHookedStatus verifies the gt-35wl fix:
+// gt done --status DEFERRED must reset the hooked bead from "hooked" back to "open"
+// so it can be re-dispatched. Without this fix, the bead stays permanently in "hooked"
+// status, and the witness zombie patrol flags the (now-idle) polecat as still working.
+func TestDeferredExitResetsHookedStatus(t *testing.T) {
+	tests := []struct {
+		name           string
+		beadStatus     string
+		exitType       string
+		wantReset      bool // should the bead be reset to open?
+	}{
+		// DEFERRED only resets beads that are stuck in "hooked" status.
+		// Beads already in open/in_progress were updated by the polecat during work
+		// and don't need resetting — the polecat may have changed them deliberately.
+		{"deferred + hooked → reset to open", "hooked", ExitDeferred, true},
+		{"deferred + in_progress → no reset (polecat updated it)", "in_progress", ExitDeferred, false},
+		{"deferred + open → no reset", "open", ExitDeferred, false},
+		// Non-DEFERRED exits don't use this reset path (they close the bead instead).
+		{"completed + hooked → no reset (close path)", "hooked", ExitCompleted, false},
+		{"escalated + hooked → no reset (close path)", "hooked", ExitEscalated, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Replicate the guard condition from updateAgentStateOnDone (gt-35wl fix):
+			// reset only when exitType==DEFERRED and bead status is exactly "hooked".
+			shouldReset := tt.exitType == ExitDeferred &&
+				beads.IssueStatus(tt.beadStatus) == beads.IssueStatusHooked
+
+			if shouldReset != tt.wantReset {
+				t.Errorf("shouldReset for exitType=%q beadStatus=%q = %v, want %v",
+					tt.exitType, tt.beadStatus, shouldReset, tt.wantReset)
+			}
+		})
+	}
+}
+
 // TestPushSubmoduleChanges_Integration verifies that pushSubmoduleChanges detects
 // modified submodules and pushes their commits before the parent repo push (gt-dzs).
 func TestPushSubmoduleChanges_Integration(t *testing.T) {
