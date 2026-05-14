@@ -1684,15 +1684,30 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 		}
 	}
 
-	if hookedBeadID != "" && exitType != ExitDeferred {
+	if hookedBeadID != "" && exitType == ExitDeferred {
+		// BUG FIX (gt-35wl): DEFERRED exits must reset the hooked bead from
+		// "hooked" to "open" so the polecat correctly appears idle after gt done.
+		// Without this, findHookedBeadForAgent still finds the bead (status=hooked),
+		// making the polecat appear "working" to the witness — causing spawn storms.
+		// Work is paused, not done: we don't close the bead, just release it.
+		if hookedBead, err := bd.Show(hookedBeadID); err == nil && hookedBead.Status == beads.StatusHooked {
+			openStatus := "open"
+			empty := ""
+			if err := bd.Update(hookedBeadID, beads.UpdateOptions{
+				Status:   &openStatus,
+				Assignee: &empty,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: couldn't reset hooked bead %s to open: %v\n", hookedBeadID, err)
+			}
+		}
+	} else if hookedBeadID != "" && exitType != ExitDeferred {
 		// BUG FIX (gt-pftz): Close hooked bead unless already terminal (closed/tombstone).
 		// Previously checked hookedBead.Status == StatusHooked, but polecats update
 		// their work bead to in_progress during work. The exact-match check caused
 		// gt done to skip closing the bead, leaving it as unassigned open work after
 		// the hook was cleared — triggering infinite dispatch loops.
 		//
-		// DEFERRED exits preserve the bead: work is paused, not done. The bead
-		// stays open/in_progress so it can be resumed on the next session.
+		// DEFERRED exits handled above: work is paused, bead released to open.
 		if hookedBead, err := bd.Show(hookedBeadID); err == nil && !beads.IssueStatus(hookedBead.Status).IsTerminal() {
 			// Guard: never close a rig identity bead. Polecats dispatched with the
 			// rig bead as their hook (via mol-polecat-work) must not close permanent

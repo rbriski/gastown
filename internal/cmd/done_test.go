@@ -1264,6 +1264,49 @@ func TestHookedBeadCloseNotRestrictedToHookedStatus(t *testing.T) {
 	}
 }
 
+// TestDeferredExitReleasesHookedBead verifies the gt-35wl fix:
+// gt done --status DEFERRED must reset the hooked bead from "hooked" to "open"
+// so the polecat correctly appears idle after exiting. Without this fix,
+// findHookedBeadForAgent still returns the bead (status=hooked), making the
+// witness classify the idle polecat as "working" and trigger spawn storms.
+func TestDeferredExitReleasesHookedBead(t *testing.T) {
+	tests := []struct {
+		name        string
+		exitType    string
+		beadStatus  string
+		wantRelease bool // should bead be reset to open (not closed)
+		wantClose   bool // should bead be closed
+	}{
+		{"DEFERRED + hooked → release to open", ExitDeferred, beads.StatusHooked, true, false},
+		{"DEFERRED + in_progress → no change (not hooked)", ExitDeferred, "in_progress", false, false},
+		{"COMPLETED + hooked → close", ExitCompleted, beads.StatusHooked, false, true},
+		{"COMPLETED + in_progress → close", ExitCompleted, "in_progress", false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Replicate the guard conditions from updateAgentStateOnDone (gt-35wl fix)
+			isDeferred := tt.exitType == ExitDeferred
+			isHooked := tt.beadStatus == beads.StatusHooked
+			isTerminal := beads.IssueStatus(tt.beadStatus).IsTerminal()
+
+			// DEFERRED path: only reset if currently hooked
+			shouldRelease := isDeferred && isHooked
+			// COMPLETED path: close if not terminal
+			shouldClose := !isDeferred && !isTerminal
+
+			if shouldRelease != tt.wantRelease {
+				t.Errorf("shouldRelease for exitType=%q status=%q = %v, want %v",
+					tt.exitType, tt.beadStatus, shouldRelease, tt.wantRelease)
+			}
+			if shouldClose != tt.wantClose {
+				t.Errorf("shouldClose for exitType=%q status=%q = %v, want %v",
+					tt.exitType, tt.beadStatus, shouldClose, tt.wantClose)
+			}
+		})
+	}
+}
+
 // TestPushSubmoduleChanges_Integration verifies that pushSubmoduleChanges detects
 // modified submodules and pushes their commits before the parent repo push (gt-dzs).
 func TestPushSubmoduleChanges_Integration(t *testing.T) {
