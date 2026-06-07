@@ -184,15 +184,30 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			BaseBranch:   baseBranch,
 			ResumeBranch: opts.ResumeBranch,
 		}
-		reuseOK := false
-		if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
-			if errors.Is(err, polecat.ErrPolecatNeedsRecovery) {
-				fmt.Printf("  Idle polecat %s needs recovery before reuse: %v; allocating new...\n", polecatName, err)
-			} else {
-				fmt.Printf("  Branch-only reuse failed for idle polecat %s: %v; allocating new...\n", polecatName, err)
+		// Detect broken-state polecats: directory exists but no .git file (gt-rucp).
+		// This happens when cleanupOnError's WorktreeRemove succeeds (removes .git)
+		// but os.RemoveAll fails, leaving .beads/.venv artifacts without git state.
+		// Nuke the broken slot so it returns to the pool before allocating a new name.
+		clonePath := polecatMgr.ClonePath(polecatName)
+		if _, gitErr := os.Stat(filepath.Join(clonePath, ".git")); os.IsNotExist(gitErr) {
+			fmt.Printf("  Idle polecat %s has no .git file (broken state from failed cleanup); nuking...\n", polecatName)
+			if nukeErr := polecatMgr.Remove(polecatName, true); nukeErr != nil {
+				fmt.Printf("  WARNING: nuke of broken polecat %s failed: %v — manual cleanup may be needed\n", polecatName, nukeErr)
 			}
-		} else {
-			reuseOK = true
+			idlePolecat = nil // clear so AllocateAndAdd runs
+		}
+
+		reuseOK := false
+		if idlePolecat != nil {
+			if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
+				if errors.Is(err, polecat.ErrPolecatNeedsRecovery) {
+					fmt.Printf("  Idle polecat %s needs recovery before reuse: %v; allocating new...\n", polecatName, err)
+				} else {
+					fmt.Printf("  Branch-only reuse failed for idle polecat %s: %v; allocating new...\n", polecatName, err)
+				}
+			} else {
+				reuseOK = true
+			}
 		}
 
 		if reuseOK {

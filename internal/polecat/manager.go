@@ -747,11 +747,15 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 
 		if worktreeCreated {
 			if rg, repoErr := m.repoBase(); repoErr == nil {
-				_ = rg.WorktreeRemove(clonePath, true)
+				if wtErr := rg.WorktreeRemove(clonePath, true); wtErr != nil {
+					style.PrintWarning("spawn rollback: WorktreeRemove(%s) failed: %v — directory may need manual cleanup", clonePath, wtErr)
+				}
 			}
 		}
 
-		_ = os.RemoveAll(polecatDir)
+		if rmErr := os.RemoveAll(polecatDir); rmErr != nil {
+			style.PrintWarning("spawn rollback: RemoveAll(%s) failed: %v — broken polecat directory left on disk (gt-rucp)", polecatDir, rmErr)
+		}
 
 		m.namePool.Release(name)
 		_ = m.namePool.Save()
@@ -939,12 +943,17 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 		// Must happen before directory removal so git can clean up properly.
 		if worktreeCreated {
 			if rg, repoErr := m.repoBase(); repoErr == nil {
-				_ = rg.WorktreeRemove(clonePath, true)
+				if wtErr := rg.WorktreeRemove(clonePath, true); wtErr != nil {
+					style.PrintWarning("spawn rollback: WorktreeRemove(%s) failed: %v — directory may need manual cleanup", clonePath, wtErr)
+				}
 			}
 		}
 
-		// Remove polecat directory
-		_ = os.RemoveAll(polecatDir)
+		// Remove polecat directory. Failure here leaves a broken partial-state directory
+		// with no .git file — RepairWorktreeWithOptions will clean it up on next sling.
+		if rmErr := os.RemoveAll(polecatDir); rmErr != nil {
+			style.PrintWarning("spawn rollback: RemoveAll(%s) failed: %v — broken polecat directory left on disk (gt-rucp)", polecatDir, rmErr)
+		}
 
 		// Release name back to pool so it can be reallocated immediately
 		// rather than waiting for the next reconcile cycle.
