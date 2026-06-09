@@ -1488,12 +1488,18 @@ notifyWitness:
 			oldBranch := branch
 
 			fmt.Printf("%s Syncing worktree to %s...\n", style.Bold.Render("→"), defaultBranch)
-			if err := g.Checkout(defaultBranch); err != nil {
-				style.PrintWarning("could not checkout %s: %v (worktree stays on feature branch)", defaultBranch, err)
-			} else if err := g.Pull("origin", defaultBranch); err != nil {
-				style.PrintWarning("could not pull %s: %v (worktree on %s but may be stale)", defaultBranch, defaultBranch, err)
+			syncRef := "origin/" + defaultBranch
+			if err := g.Fetch("origin"); err != nil {
+				style.PrintWarning("could not fetch origin before idle sync: %v (using local refs)", err)
+			}
+			if err := g.CheckoutDetach(syncRef); err != nil {
+				if fallbackErr := g.CheckoutDetach(defaultBranch); fallbackErr != nil {
+					style.PrintWarning("could not detach checkout %s: %v; fallback %s also failed: %v (worktree stays on feature branch)", syncRef, err, defaultBranch, fallbackErr)
+				} else {
+					fmt.Printf("%s Worktree synced to %s (detached fallback)\n", style.Bold.Render("✓"), defaultBranch)
+				}
 			} else {
-				fmt.Printf("%s Worktree synced to %s\n", style.Bold.Render("✓"), defaultBranch)
+				fmt.Printf("%s Worktree synced to %s (detached)\n", style.Bold.Render("✓"), syncRef)
 			}
 
 			// Delete the old polecat branch (non-fatal: cleanup only).
