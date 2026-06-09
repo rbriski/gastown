@@ -235,7 +235,10 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// Per-rig directory cap: prevent unbounded worktree accumulation, but only
 	// after trying safe reuse. A reusable preserved polecat should not be blocked
 	// just because the rig is already at the directory cap.
-	const maxPolecatDirsPerRig = 30
+	maxPolecatDirsPerRig := r.GetIntConfig("max_polecats")
+	if maxPolecatDirsPerRig < 30 {
+		maxPolecatDirsPerRig = 30
+	}
 	rigPolecatDir := filepath.Join(townRoot, rigName, "polecats")
 	if entries, err := os.ReadDir(rigPolecatDir); err == nil {
 		dirCount := 0
