@@ -3682,6 +3682,57 @@ func TestBuildCommandWithPromptNoWarnOnEmptyPrompt(t *testing.T) {
 	}
 }
 
+func TestCodexBuildCommandWithPromptIncludesBootstrapPrompt(t *testing.T) {
+	rc := RuntimeConfigFromPreset(AgentCodex)
+
+	var cmd string
+	stderr := captureStderr(t, func() {
+		cmd = rc.BuildCommandWithPrompt("bootstrap now")
+	})
+
+	if stderr != "" {
+		t.Errorf("no warning expected for codex prompt delivery, got: %q", stderr)
+	}
+	if !strings.Contains(cmd, "bootstrap now") {
+		t.Errorf("codex startup command should include bootstrap prompt, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, codexUpdateCheckConfig) {
+		t.Errorf("codex startup command should suppress update checks, got: %s", cmd)
+	}
+}
+
+func TestFillRuntimeDefaultsCodexCustomArgsSuppressesUpdateCheck(t *testing.T) {
+	rc := fillRuntimeDefaults(&RuntimeConfig{
+		Provider: "codex",
+		Command:  "codex",
+		Args:     []string{"--profile", "fast"},
+	})
+
+	args := strings.Join(rc.Args, " ")
+	if !strings.Contains(args, codexUpdateCheckConfig) {
+		t.Fatalf("codex custom args missing update suppression: %v", rc.Args)
+	}
+	if strings.Count(args, "check_for_update_on_startup") != 1 {
+		t.Fatalf("codex update suppression duplicated: %v", rc.Args)
+	}
+}
+
+func TestFillRuntimeDefaultsCodexDoesNotOverrideExplicitUpdateCheck(t *testing.T) {
+	rc := fillRuntimeDefaults(&RuntimeConfig{
+		Provider: "codex",
+		Command:  "codex",
+		Args:     []string{"-c", "check_for_update_on_startup=true"},
+	})
+
+	args := strings.Join(rc.Args, " ")
+	if strings.Count(args, "check_for_update_on_startup") != 1 {
+		t.Fatalf("explicit codex update config should not be duplicated: %v", rc.Args)
+	}
+	if !strings.Contains(args, "check_for_update_on_startup=true") {
+		t.Fatalf("explicit codex update config should be preserved: %v", rc.Args)
+	}
+}
+
 // TestBuildArgsWithPromptWarnsOnDroppedPrompt verifies the parallel warning in
 // BuildArgsWithPrompt when PromptMode is "none" and a non-empty prompt is provided.
 func TestBuildArgsWithPromptWarnsOnDroppedPrompt(t *testing.T) {

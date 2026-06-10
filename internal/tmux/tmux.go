@@ -1870,6 +1870,20 @@ func (t *Tmux) AcceptStartupDialogs(session string) error {
 	return nil
 }
 
+// CheckStartupBlocked fails fast when a known interactive startup modal is
+// still visible after dialog acceptance. These modals block automated sessions
+// from receiving or acting on the bootstrap prompt.
+func (t *Tmux) CheckStartupBlocked(session string) error {
+	content, err := t.CapturePane(session, 80)
+	if err != nil {
+		return err
+	}
+	if blocker, ok := containsBlockingStartupDialog(content); ok {
+		return fmt.Errorf("interactive startup dialog still visible in %s: %s", session, blocker)
+	}
+	return nil
+}
+
 // AcceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
 // "Do you trust the contents of this directory?". In both cases the safe
@@ -1918,6 +1932,25 @@ func containsWorkspaceTrustDialog(content string) bool {
 	return strings.Contains(content, "trust this folder") ||
 		strings.Contains(content, "Quick safety check") ||
 		strings.Contains(content, "Do you trust the contents of this directory?")
+}
+
+func containsBlockingStartupDialog(content string) (string, bool) {
+	if containsCodexUpdateDialog(content) {
+		return "codex update prompt", true
+	}
+	if containsWorkspaceTrustDialog(content) {
+		return "workspace trust prompt", true
+	}
+	if strings.Contains(content, "Bypass Permissions mode") {
+		return "bypass permissions prompt", true
+	}
+	return "", false
+}
+
+func containsCodexUpdateDialog(content string) bool {
+	return strings.Contains(content, "Update available!") &&
+		strings.Contains(content, "Update now") &&
+		strings.Contains(content, "Skip until next version")
 }
 
 // promptSuffixes are strings that indicate a shell or agent prompt is visible.

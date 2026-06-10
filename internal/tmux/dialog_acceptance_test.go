@@ -223,6 +223,55 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 	}
 }
 
+func TestContainsBlockingStartupDialog(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		content     string
+		wantBlocked bool
+		wantName    string
+	}{
+		{
+			name: "codex update modal",
+			content: `Update available! 0.137.0 -> 0.138.0
+Update now
+Skip
+Skip until next version`,
+			wantBlocked: true,
+			wantName:    "codex update prompt",
+		},
+		{
+			name:        "codex trust modal",
+			content:     "> You are in /tmp/demo\nDo you trust the contents of this directory?",
+			wantBlocked: true,
+			wantName:    "workspace trust prompt",
+		},
+		{
+			name:        "bypass modal",
+			content:     "Bypass Permissions mode\n1. No\n2. Yes, I accept",
+			wantBlocked: true,
+			wantName:    "bypass permissions prompt",
+		},
+		{
+			name:        "ready prompt",
+			content:     "› ",
+			wantBlocked: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotName, gotBlocked := containsBlockingStartupDialog(tt.content)
+			if gotBlocked != tt.wantBlocked {
+				t.Fatalf("blocked = %v, want %v", gotBlocked, tt.wantBlocked)
+			}
+			if gotName != tt.wantName {
+				t.Fatalf("name = %q, want %q", gotName, tt.wantName)
+			}
+		})
+	}
+}
+
 // TestDismissStartupDialogsBlind_SendsKeys verifies that the blind dismiss
 // sends keys without error on a valid session (no screen-scraping).
 func TestDismissStartupDialogsBlind_SendsKeys(t *testing.T) {
