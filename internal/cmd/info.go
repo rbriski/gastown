@@ -75,6 +75,13 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.2.2",
+		Date:    "2026-06-10",
+		Changes: []string{
+			"FIX: Reaper SQL migrated to current dependency schema — resolves 'Error 1105: table wd does not have column depends_on_id' on all scan/reap/purge queries (hq-9xrf1).",
+		},
+	},
+	{
 		Version: "1.2.1",
 		Date:    "2026-06-06",
 		Changes: []string{

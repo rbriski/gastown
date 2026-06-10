@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-06-10
+
+### Fixed
+
+- **Reaper SQL migrated to current dependency schema** — the installed 1.2.1
+  binary queried the stale `wd.depends_on_id` column that no longer exists after
+  the Dolt schema migration to `wisp_dependencies`/`dependencies` tables. All
+  reaper scan/reap/purge queries now use `wd.depends_on_wisp_id` and
+  `wd.depends_on_issue_id`, resolving `Error 1105: table "wd" does not have
+  column "depends_on_id"` (hq-wisp-50ag, hq-wisp-q3b, hq-wisp-js9o).
+
 ## [1.2.1] - 2026-06-06
 
 ### Fixed
