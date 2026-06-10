@@ -2045,23 +2045,31 @@ func isStaleBranchIssue(branchIssue, hookedIssue string) bool {
 	return branchIssue != hookedIssue && !strings.HasPrefix(branchIssue, hookedIssue+".")
 }
 
-// findHookedBeadForAgent queries for beads with status=hooked assigned to this agent.
+// findHookedBeadForAgent queries for the agent's current assignment bead.
 // This is the authoritative source for what work a polecat is doing, since the
 // work bead itself tracks status and assignee (hq-l6mm5).
-// Returns empty string if no hooked bead is found.
+//
+// Both hooked AND in_progress are checked (hq-xa4z): polecats routinely claim
+// their assignment with `bd update --status=in_progress` when starting work,
+// which made a hooked-only lookup blind to the active assignment — the stale-
+// branch guard and the hook fallback silently no-op'd (same class of bug as
+// gt-pftz in the close path). Hooked wins over in_progress when both exist.
+// Returns empty string if no assignment bead is found.
 func findHookedBeadForAgent(bd *beads.Beads, agentID string) string {
 	if agentID == "" {
 		return ""
 	}
-	hookedBeads, err := bd.List(beads.ListOptions{
-		Status:   beads.StatusHooked,
-		Assignee: agentID,
-		Priority: -1,
-	})
-	if err != nil || len(hookedBeads) == 0 {
-		return ""
+	for _, status := range []string{beads.StatusHooked, "in_progress"} {
+		assigned, err := bd.List(beads.ListOptions{
+			Status:   status,
+			Assignee: agentID,
+			Priority: -1,
+		})
+		if err == nil && len(assigned) > 0 {
+			return assigned[0].ID
+		}
 	}
-	return hookedBeads[0].ID
+	return ""
 }
 
 // parseCleanupStatus converts a string flag value to a CleanupStatus.

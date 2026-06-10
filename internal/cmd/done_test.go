@@ -334,6 +334,33 @@ func TestFindHookedBeadForAgent(t *testing.T) {
 			wantIssueID: "test-456",
 		},
 		{
+			// Regression for hq-xa4z: polecats claim their assignment with
+			// `bd update --status=in_progress` when starting work. A
+			// hooked-only lookup returned empty here, blinding the stale-
+			// branch guard (toast re-wisp-e2q carried source_issue re-k8oa
+			// while the real assignment re-dkf sat in_progress).
+			name:    "in_progress bead assigned to agent returns issue ID",
+			agentID: "testrig/polecats/toast",
+			setupBeads: func(t *testing.T, bd *beads.Beads) {
+				_, err := bd.CreateWithID("test-789", beads.CreateOptions{
+					Title:  "Claimed task",
+					Labels: []string{"gt:task"},
+				})
+				if err != nil {
+					t.Fatalf("create task bead: %v", err)
+				}
+				inProgress := "in_progress"
+				assignee := "testrig/polecats/toast"
+				if err := bd.Update("test-789", beads.UpdateOptions{
+					Status:   &inProgress,
+					Assignee: &assignee,
+				}); err != nil {
+					t.Fatalf("update bead to in_progress: %v", err)
+				}
+			},
+			wantIssueID: "test-789",
+		},
+		{
 			name:        "no hooked beads returns empty",
 			agentID:     "testrig/polecats/idle",
 			setupBeads:  func(t *testing.T, bd *beads.Beads) {},
