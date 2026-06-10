@@ -1591,3 +1591,93 @@ func testRunGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }
+
+// fakeDraftPRCtrl is a test double for draftPRController.
+type fakeDraftPRCtrl struct {
+	draftNum    int
+	findErr     error
+	readyErr    error
+	prURL       string
+	urlErr      error
+	markedReady int
+}
+
+func (f *fakeDraftPRCtrl) FindDraftPRNumber(branch string) (int, error) {
+	return f.draftNum, f.findErr
+}
+
+func (f *fakeDraftPRCtrl) MarkPRReadyForReview(n int) error {
+	f.markedReady = n
+	return f.readyErr
+}
+
+func (f *fakeDraftPRCtrl) GetPRURL(n int) (string, error) {
+	return f.prURL, f.urlErr
+}
+
+// TestPublishOrCreateNoMergePR_DraftExists verifies that when a draft PR exists,
+// publishOrCreateNoMergePR publishes it (draft→ready) and does not call createFn.
+func TestPublishOrCreateNoMergePR_DraftExists(t *testing.T) {
+	ctrl := &fakeDraftPRCtrl{draftNum: 42, prURL: "https://github.com/test/repo/pull/42"}
+	createCalled := false
+	url, published, err := publishOrCreateNoMergePR(ctrl, "feat-branch", func() (string, error) {
+		createCalled = true
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !published {
+		t.Error("published = false, want true when draft PR exists")
+	}
+	if url != "https://github.com/test/repo/pull/42" {
+		t.Errorf("url = %q, want %q", url, "https://github.com/test/repo/pull/42")
+	}
+	if ctrl.markedReady != 42 {
+		t.Errorf("markedReady = %d, want 42", ctrl.markedReady)
+	}
+	if createCalled {
+		t.Error("createFn should not be called when draft PR exists")
+	}
+}
+
+// TestPublishOrCreateNoMergePR_NoDraftPR verifies that when no draft PR exists,
+// publishOrCreateNoMergePR calls createFn to create a ready PR directly.
+func TestPublishOrCreateNoMergePR_NoDraftPR(t *testing.T) {
+	ctrl := &fakeDraftPRCtrl{draftNum: 0}
+	createCalled := false
+	url, published, err := publishOrCreateNoMergePR(ctrl, "feat-branch", func() (string, error) {
+		createCalled = true
+		return "https://github.com/test/repo/pull/99", nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if published {
+		t.Error("published = true, want false when no draft PR exists")
+	}
+	if url != "https://github.com/test/repo/pull/99" {
+		t.Errorf("url = %q, want %q", url, "https://github.com/test/repo/pull/99")
+	}
+	if !createCalled {
+		t.Error("createFn should be called when no draft PR exists")
+	}
+}
+
+// TestPublishOrCreateNoMergePR_MarkReadyFails verifies that a failure to publish
+// the draft PR is surfaced as an error.
+func TestPublishOrCreateNoMergePR_MarkReadyFails(t *testing.T) {
+	ctrl := &fakeDraftPRCtrl{
+		draftNum: 42,
+		readyErr: fmt.Errorf("not authorized"),
+	}
+	_, _, err := publishOrCreateNoMergePR(ctrl, "feat-branch", func() (string, error) {
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("expected error when MarkPRReadyForReview fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "not authorized") {
+		t.Errorf("error = %q, want to contain 'not authorized'", err.Error())
+	}
+}

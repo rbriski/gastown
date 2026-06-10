@@ -3098,3 +3098,31 @@ func TestBranchPushedToRemote_NoPushURL(t *testing.T) {
 		t.Errorf("BranchPushedToRemote unpushed = %d, want >= 1", unpushed)
 	}
 }
+
+func TestParseDraftPRListOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   []byte
+		want    int
+		wantErr bool
+	}{
+		{name: "empty array", input: []byte("[]"), want: 0},
+		{name: "empty input", input: []byte(""), want: 0},
+		{name: "draft PR exists", input: []byte(`[{"number":42,"isDraft":true}]`), want: 42},
+		{name: "non-draft PR", input: []byte(`[{"number":99,"isDraft":false}]`), want: 0},
+		{name: "first is draft", input: []byte(`[{"number":7,"isDraft":true},{"number":8,"isDraft":false}]`), want: 7},
+		{name: "first is not draft", input: []byte(`[{"number":7,"isDraft":false},{"number":8,"isDraft":true}]`), want: 0},
+		{name: "invalid JSON", input: []byte("not-json"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseDraftPRListOutput(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseDraftPRListOutput(%q) error = %v, wantErr = %v", tt.input, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("parseDraftPRListOutput(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}

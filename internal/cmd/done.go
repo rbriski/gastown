@@ -945,19 +945,30 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					prBodyBuilder.WriteString("---\n")
 					prBodyBuilder.WriteString(fmt.Sprintf("*Polecat: %s | Issue: %s*\n", worker, issueID))
 					prBody := prBodyBuilder.String()
-					ghCmd := exec.CommandContext(context.Background(), "gh", "pr", "create",
-						"--base", defaultBranch,
-						"--head", branch,
-						"--title", prTitle,
-						"--body", prBody,
-					)
-					ghCmd.Dir = cwd
-					prOutput, prErr := ghCmd.Output()
+					// Use publishOrCreateNoMergePR: publishes an existing draft PR
+					// (draft→ready) if one exists, otherwise creates a ready PR.
+					// Polecats should create a draft PR early to iterate without
+					// triggering CodeRabbit; gt done is the single publish action.
+					fetchedURL, wasPublished, prErr := publishOrCreateNoMergePR(g, branch, func() (string, error) {
+						ghCmd := exec.CommandContext(context.Background(), "gh", "pr", "create",
+							"--base", defaultBranch,
+							"--head", branch,
+							"--title", prTitle,
+							"--body", prBody,
+						)
+						ghCmd.Dir = cwd
+						out, err := ghCmd.Output()
+						return strings.TrimSpace(string(out)), err
+					})
 					if prErr != nil {
-						style.PrintWarning("could not create GitHub PR: %v", prErr)
+						style.PrintWarning("could not create/publish GitHub PR: %v", prErr)
 					} else {
-						prURL = strings.TrimSpace(string(prOutput))
-						fmt.Printf("%s GitHub PR created: %s\n", style.Bold.Render("✓"), prURL)
+						prURL = fetchedURL
+						if wasPublished {
+							fmt.Printf("%s PR published (ready for review): %s\n", style.Bold.Render("✓"), prURL)
+						} else {
+							fmt.Printf("%s GitHub PR created: %s\n", style.Bold.Render("✓"), prURL)
+						}
 					}
 				} else {
 					fmt.Printf("%s\n", style.Dim.Render("Work stays on feature branch for human review."))
@@ -1511,6 +1522,34 @@ func pushSubmoduleChanges(g *git.Git, defaultBranch string) {
 			fmt.Printf("%s Submodule %s pushed\n", style.Bold.Render("✓"), sc.Path)
 		}
 	}
+}
+
+// draftPRController is the subset of git.Git operations needed for draft PR management.
+type draftPRController interface {
+	FindDraftPRNumber(branch string) (int, error)
+	MarkPRReadyForReview(prNumber int) error
+	GetPRURL(prNumber int) (string, error)
+}
+
+// publishOrCreateNoMergePR implements the draft-PR-first logic for no_merge tasks.
+// It checks for an existing draft PR and publishes it (draft→ready) if found,
+// otherwise calls createFn to create a new ready PR directly.
+// Returns (prURL, wasPublished, error).
+func publishOrCreateNoMergePR(
+	ctrl draftPRController,
+	branch string,
+	createFn func() (string, error),
+) (url string, published bool, err error) {
+	draftNum, findErr := ctrl.FindDraftPRNumber(branch)
+	if findErr == nil && draftNum != 0 {
+		if readyErr := ctrl.MarkPRReadyForReview(draftNum); readyErr != nil {
+			return "", false, fmt.Errorf("publish draft PR: %w", readyErr)
+		}
+		fetchedURL, _ := ctrl.GetPRURL(draftNum)
+		return fetchedURL, true, nil
+	}
+	newURL, createErr := createFn()
+	return newURL, false, createErr
 }
 
 func forceCloseIssueWithRetry(closeFn func(string, ...string) error, issueID, reason, successFormat string) error {

@@ -215,6 +215,34 @@ Your work goes through the merge queue:
 
 **Do NOT create GitHub PRs either.** The merge queue handles everything.
 
+---
+
+## PR Workflow — Draft While Iterating, Publish When Done
+
+For repos that use the `merge_strategy: pr` workflow (GitHub PRs instead of the refinery MQ):
+
+**The rule:**
+
+1. **Iterate on a DRAFT PR.** Create your PR as draft at the start of work:
+   ```bash
+   gh pr create --draft --base main --head <branch> --title "WIP: <title>"
+   ```
+   Push iterative commits to the draft — CodeRabbit does NOT run on draft PRs,
+   so you avoid re-queuing review on every intermediate push.
+
+2. **Run `gt done` ONLY when work is completely finished** — code done, tests green,
+   self-review complete. `gt done` is the publish action: it converts the draft PR
+   to ready-for-review (triggering the CodeRabbit workflow + findings gate exactly once)
+   and notifies the dispatcher.
+
+3. **After `gt done` publishes, do NOT push more commits** except to resolve
+   CodeRabbit findings. Every push to a published PR re-triggers CodeRabbit;
+   if you keep pushing, the findings gate never settles.
+
+**Why:** A published PR that keeps receiving commits re-triggers CodeRabbit per push;
+the findings-resolved gate reads CR's last posted review, so a moving target never
+converges. Draft-until-done makes CR a single clean pass.
+
 ### The Landing Rule
 
 > **Work is NOT landed until it's in the Refinery MQ.**

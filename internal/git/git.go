@@ -1448,6 +1448,66 @@ func (g *Git) FindPRNumber(branch string) (int, error) {
 	return prs[0].Number, nil
 }
 
+// FindDraftPRNumber returns the PR number if a draft PR exists for the given branch.
+// Returns 0 (no error) when no open draft PR is found.
+func (g *Git) FindDraftPRNumber(branch string) (int, error) {
+	cmd := exec.Command("gh", "pr", "list", "--head", branch, "--state", "open",
+		"--json", "number,isDraft", "--limit", "1")
+	cmd.Dir = g.workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("gh pr list failed: %w", err)
+	}
+	return parseDraftPRListOutput(bytes.TrimSpace(out))
+}
+
+// parseDraftPRListOutput parses JSON from `gh pr list --json number,isDraft`.
+// Returns the number of the first entry if isDraft is true, otherwise 0.
+func parseDraftPRListOutput(data []byte) (int, error) {
+	if len(data) <= 2 { // "[]" or empty
+		return 0, nil
+	}
+	var prs []struct {
+		Number  int  `json:"number"`
+		IsDraft bool `json:"isDraft"`
+	}
+	if err := json.Unmarshal(data, &prs); err != nil {
+		return 0, fmt.Errorf("failed to parse gh pr list output: %w", err)
+	}
+	if len(prs) == 0 || !prs[0].IsDraft {
+		return 0, nil
+	}
+	return prs[0].Number, nil
+}
+
+// MarkPRReadyForReview converts a draft PR to ready for review using the gh CLI.
+func (g *Git) MarkPRReadyForReview(prNumber int) error {
+	cmd := exec.Command("gh", "pr", "ready", fmt.Sprintf("%d", prNumber))
+	cmd.Dir = g.workDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh pr ready %d failed: %s: %w", prNumber, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// GetPRURL returns the HTML URL of a GitHub PR.
+func (g *Git) GetPRURL(prNumber int) (string, error) {
+	cmd := exec.Command("gh", "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "url")
+	cmd.Dir = g.workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view %d failed: %w", prNumber, err)
+	}
+	var result struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out), &result); err != nil {
+		return "", fmt.Errorf("failed to parse gh pr view output: %w", err)
+	}
+	return result.URL, nil
+}
+
 // IsPRApproved checks whether a GitHub PR has at least one approving review.
 // Returns true if approved, false if not (or on error).
 func (g *Git) IsPRApproved(prNumber int) (bool, error) {
