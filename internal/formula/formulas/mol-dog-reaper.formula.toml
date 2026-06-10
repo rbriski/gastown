@@ -48,7 +48,7 @@ NOT anomalies (do NOT escalate these):
   race condition — the witness closes wisps for dead sessions concurrently.
   This is expected behavior, not a bug."""
 formula = "mol-dog-reaper"
-version = 3
+version = 4
 
 [squash]
 trigger = "on_complete"
@@ -76,26 +76,44 @@ gt reaper scan --db=<name> --port={{dolt_port}} \\
   --json
 ```
 
-**3. Inspect results for anomalies:**
-- Check the `anomalies` array in the JSON output
-- Flag any `dangling_parent_ref` anomalies — these indicate wisps with
-  parent dependency records pointing to purged/missing parents
-- If `open_wisps` exceeds {{alert_threshold}}, escalate **with fingerprint** to prevent
-  the reaper itself from inflating the count further:
-  ```bash
-  gt escalate "Reaper: open_wisps=<N> exceeds threshold {{alert_threshold}}" \
-    -s MEDIUM --fingerprint "reaper:wisp-count-alert"
-  ```
-  Using `--fingerprint` ensures only one escalation bead exists for this condition.
-  Without it, each reaper run creates a new escalation wisp, inflating open_wisps
-  further and triggering more escalations — the feedback loop this formula is designed
-  to prevent.
+**3. Tally total open wisps across all databases, then apply hysteresis-aware alerting:**
 
-**4. Decide whether to proceed:**
+Sum `open_wisps` from all scan results, then run the watch-threshold command
+with that total. This command manages the full escalation lifecycle with
+correct hysteresis — it creates an alert only on the first upward crossing,
+updates the existing alert while the condition persists, and auto-closes
+the alert when the count falls back below the threshold:
+
+```bash
+gt escalate watch-threshold \\
+  --count=<total_open_wisps> \\
+  --threshold={{alert_threshold}} \\
+  --fingerprint "reaper:wisp-count-alert" \\
+  --description "Reaper: open_wisps=<total_open_wisps> exceeds alert_threshold={{alert_threshold}}" \\
+  --severity MEDIUM \\
+  --source reaper \\
+  --json
+```
+
+The returned `action` field tells you what happened:
+- `created` — first time the threshold was crossed; a new escalation bead was filed
+- `updated` — threshold was already exceeded; existing escalation title updated with current count
+- `closed` — count dropped back below threshold; escalation auto-closed
+- `none` — count is below threshold and no open escalation exists (steady state)
+
+**Do NOT** use `gt escalate` directly for the wisp-count alert — that bypasses
+hysteresis and will mint a new bead every reaper cycle, recreating the feedback loop.
+
+**4. Check anomalies:**
+- Check the `anomalies` array in each scan result
+- Flag any `dangling_parent_ref` anomalies — wisps with dependency records pointing to purged/missing parents
+- For structural anomalies (not count-based), use `gt escalate` directly (with a fingerprint)
+
+**5. Decide whether to proceed:**
 - If no candidates found across all databases, skip remaining steps
 - If anomalies are severe, consider escalating before proceeding
 
-**Exit criteria:** Scan complete, candidates identified, anomalies flagged."""
+**Exit criteria:** Scan complete, candidates identified, threshold alert state managed."""
 
 [[steps]]
 id = "reap"
@@ -246,8 +264,8 @@ description = "Max closed mail age before purging (e.g., '168h' = 7 days)"
 default = "168h"
 
 [vars.alert_threshold]
-description = "Open wisp count that triggers escalation warning"
-default = "800"
+description = "Total open wisp count (across all DBs) that triggers alerting. Set above your real post-cleanup steady state. Run 'gt reaper scan --json | jq .open_wisps' after a full reaper cycle to measure baseline; set this ~50% above that. Default 700 gives headroom for a single-rig town; multi-rig towns (8-10 polecats) should set to 1000-1200."
+default = "700"
 
 [vars.dry_run]
 description = "If 'true', report without modifying data"

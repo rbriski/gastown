@@ -664,6 +664,174 @@ func runEscalateShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runEscalateWatchThreshold implements the watch-threshold subcommand.
+// It provides hysteresis-aware alerting: at most one open escalation per
+// condition, created only on upward threshold crossings, closed when cleared.
+func runEscalateWatchThreshold(cmd *cobra.Command, args []string) error {
+	count := escalateWatchCount
+	threshold := escalateWatchThreshold
+	fingerprint := escalateFingerprint
+	description := escalateWatchDescription
+	if description == "" {
+		description = fmt.Sprintf("open_wisps=%d exceeds alert threshold %d", count, threshold)
+	}
+
+	fingerprintLabel := escalationFingerprintLabel(fingerprint)
+	belowThreshold := count <= threshold
+
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	bd := beads.New(beads.ResolveBeadsDir(townRoot))
+
+	// Find any existing open escalation with this fingerprint.
+	existing, err := bd.ListEscalationsByFingerprint(fingerprintLabel)
+	if err != nil {
+		return fmt.Errorf("checking escalation fingerprint: %w", err)
+	}
+	hasExisting := len(existing) > 0
+	var existingID string
+	if hasExisting {
+		existingID = existing[0].ID
+	}
+
+	type watchResult struct {
+		Action         string `json:"action"`
+		Count          int    `json:"count"`
+		Threshold      int    `json:"threshold"`
+		BelowThreshold bool   `json:"below_threshold"`
+		EscalationID   string `json:"escalation_id,omitempty"`
+		DryRun         bool   `json:"dry_run,omitempty"`
+	}
+
+	printResult := func(action string, id string) {
+		if escalateJSON {
+			r := watchResult{
+				Action:         action,
+				Count:          count,
+				Threshold:      threshold,
+				BelowThreshold: belowThreshold,
+				EscalationID:   id,
+				DryRun:         escalateDryRun,
+			}
+			out, _ := json.MarshalIndent(r, "", "  ")
+			fmt.Println(string(out))
+		} else {
+			prefix := ""
+			if escalateDryRun {
+				prefix = "[DRY RUN] "
+			}
+			switch action {
+			case "created":
+				fmt.Printf("%sEscalation created: %s (count=%d > threshold=%d)\n", prefix, id, count, threshold)
+			case "updated":
+				fmt.Printf("%sEscalation updated: %s (count=%d still > threshold=%d)\n", prefix, id, count, threshold)
+			case "closed":
+				fmt.Printf("%sEscalation closed: %s (count=%d <= threshold=%d, condition cleared)\n", prefix, id, count, threshold)
+			case "none":
+				fmt.Printf("%sNo action (count=%d <= threshold=%d, no open escalation)\n", prefix, count, threshold)
+			}
+		}
+	}
+
+	if belowThreshold {
+		if !hasExisting {
+			// Condition clear, no open escalation — nothing to do.
+			printResult("none", "")
+			return nil
+		}
+		// Condition cleared — close the existing escalation.
+		closeReason := fmt.Sprintf("count=%d fell below threshold=%d; condition cleared", count, threshold)
+		if escalateDryRun {
+			printResult("closed", existingID)
+			return nil
+		}
+		if err := bd.CloseWithReason(closeReason, existingID); err != nil {
+			return fmt.Errorf("closing cleared escalation %s: %w", existingID, err)
+		}
+		printResult("closed", existingID)
+		return nil
+	}
+
+	// count > threshold
+	if hasExisting {
+		// Condition persists — update title with latest count instead of creating new bead.
+		newTitle := fmt.Sprintf("%s [count=%d]", description, count)
+		if escalateDryRun {
+			printResult("updated", existingID)
+			return nil
+		}
+		if err := bd.Update(existingID, beads.UpdateOptions{Title: &newTitle}); err != nil {
+			return fmt.Errorf("updating existing escalation %s: %w", existingID, err)
+		}
+		printResult("updated", existingID)
+		return nil
+	}
+
+	// Upward crossing: no existing escalation, count just exceeded threshold → CREATE.
+	severity := strings.ToLower(escalateSeverity)
+	if !config.IsValidSeverity(severity) {
+		return fmt.Errorf("invalid severity '%s': must be critical, high, medium, or low", escalateSeverity)
+	}
+	agentID := detectSender()
+	if agentID == "" {
+		agentID = "unknown"
+	}
+	fields := &beads.EscalationFields{
+		Severity:    severity,
+		Source:      escalateSource,
+		EscalatedBy: agentID,
+		EscalatedAt: time.Now().Format(time.RFC3339),
+		Fingerprint: fingerprintLabel,
+	}
+	if escalateDryRun {
+		printResult("created", "(dry-run)")
+		return nil
+	}
+	issue, err := bd.CreateEscalationBead(description, fields)
+	if err != nil {
+		return fmt.Errorf("creating escalation bead: %w", err)
+	}
+
+	// Load config to route the new escalation.
+	escalationConfig, err := config.LoadOrCreateEscalationConfig(config.EscalationConfigPath(townRoot))
+	if err != nil {
+		// Non-fatal: bead created, routing optional.
+		fmt.Fprintf(os.Stderr, "warning: loading escalation config: %v\n", err)
+		printResult("created", issue.ID)
+		return nil
+	}
+	actions := escalationConfig.GetRouteForSeverity(severity)
+	targets := extractMailTargetsFromActions(actions)
+	router := mail.NewRouter(townRoot)
+	defer router.WaitPendingNotifications()
+	for _, target := range targets {
+		msg := &mail.Message{
+			From:     agentID,
+			To:       target,
+			Subject:  fmt.Sprintf("[%s] %s", strings.ToUpper(severity), description),
+			Body:     formatEscalationMailBody(issue.ID, severity, "", agentID, ""),
+			Type:     mail.TypeEscalation,
+			ThreadID: issue.ID,
+		}
+		switch severity {
+		case config.SeverityCritical:
+			msg.Priority = mail.PriorityUrgent
+		case config.SeverityHigh:
+			msg.Priority = mail.PriorityHigh
+		default:
+			msg.Priority = mail.PriorityNormal
+		}
+		if err := router.Send(msg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to notify %s: %v\n", target, err)
+		}
+	}
+	printResult("created", issue.ID)
+	return nil
+}
+
 // Helper functions
 
 // extractMailTargetsFromActions extracts mail targets from action strings.

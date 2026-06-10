@@ -18,6 +18,11 @@ var (
 	escalateDryRun      bool
 	escalateCloseReason string
 	escalateStdin       bool // Read reason from stdin
+
+	// watch-threshold flags
+	escalateWatchCount       int
+	escalateWatchThreshold   int
+	escalateWatchDescription string
 )
 
 var escalateCmd = &cobra.Command{
@@ -126,6 +131,37 @@ Examples:
 	RunE: runEscalateStale,
 }
 
+var escalateWatchThresholdCmd = &cobra.Command{
+	Use:   "watch-threshold",
+	Short: "Hysteresis-aware alerting for recurring threshold conditions",
+	Long: `Monitor a numeric threshold and manage a single escalation bead with hysteresis.
+
+This command replaces the naive "escalate on every cycle" pattern with a proper
+state machine:
+
+  count > threshold, no open escalation  → CREATE  (upward crossing detected)
+  count > threshold, open escalation exists → UPDATE title with latest count
+  count <= threshold, open escalation exists → CLOSE  (condition cleared)
+  count <= threshold, no open escalation  → NONE   (nothing to do)
+
+The escalation is identified by --fingerprint, ensuring at most one open
+escalation exists for this condition at any time. The --description is used
+as the bead title when creating; updates change the title to reflect the
+current count.
+
+Use --json for machine-readable output (returns action: created/updated/closed/none).
+
+Examples:
+  gt escalate watch-threshold --count=650 --threshold=600 \
+    --fingerprint "reaper:wisp-count-alert" \
+    --description "Reaper: open_wisps exceeds alert threshold" \
+    --severity medium --source reaper
+
+  gt escalate watch-threshold --count=400 --threshold=600 \
+    --fingerprint "reaper:wisp-count-alert" --json`,
+	RunE: runEscalateWatchThreshold,
+}
+
 var escalateShowCmd = &cobra.Command{
 	Use:   "show <escalation-id>",
 	Short: "Show details of an escalation",
@@ -164,12 +200,24 @@ func init() {
 	// Show subcommand flags
 	escalateShowCmd.Flags().BoolVar(&escalateJSON, "json", false, "Output as JSON")
 
+	// watch-threshold subcommand flags
+	escalateWatchThresholdCmd.Flags().IntVar(&escalateWatchCount, "count", 0, "Current open wisp count (required)")
+	escalateWatchThresholdCmd.Flags().IntVar(&escalateWatchThreshold, "threshold", 500, "Alert threshold")
+	escalateWatchThresholdCmd.Flags().StringVar(&escalateWatchDescription, "description", "", "Escalation title/description (used when creating)")
+	escalateWatchThresholdCmd.Flags().StringVar(&escalateFingerprint, "fingerprint", "", "Stable dedup key (required)")
+	escalateWatchThresholdCmd.Flags().StringVarP(&escalateSeverity, "severity", "s", "medium", "Severity level: critical, high, medium, low")
+	escalateWatchThresholdCmd.Flags().StringVar(&escalateSource, "source", "", "Source identifier (e.g., reaper, patrol:deacon)")
+	escalateWatchThresholdCmd.Flags().BoolVar(&escalateDryRun, "dry-run", false, "Show what would happen without acting")
+	escalateWatchThresholdCmd.Flags().BoolVar(&escalateJSON, "json", false, "Output as JSON")
+	_ = escalateWatchThresholdCmd.MarkFlagRequired("fingerprint")
+
 	// Add subcommands
 	escalateCmd.AddCommand(escalateListCmd)
 	escalateCmd.AddCommand(escalateAckCmd)
 	escalateCmd.AddCommand(escalateCloseCmd)
 	escalateCmd.AddCommand(escalateStaleCmd)
 	escalateCmd.AddCommand(escalateShowCmd)
+	escalateCmd.AddCommand(escalateWatchThresholdCmd)
 
 	rootCmd.AddCommand(escalateCmd)
 }
