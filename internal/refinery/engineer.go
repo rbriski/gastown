@@ -212,6 +212,7 @@ type MRInfo struct {
 	Priority        int        // Priority (lower = higher priority)
 	AgentBead       string     // Agent bead ID that created this MR
 	RetryCount      int        // Conflict retry count
+	ConflictTaskID  string     // Open conflict-resolution task for this MR (if any)
 	ConvoyID        string     // Parent convoy ID if part of a convoy
 	ConvoyCreatedAt *time.Time // Convoy creation time
 	CreatedAt       time.Time  // MR creation time
@@ -1225,6 +1226,11 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 		}
 	}
 
+	// 1.2. Close conflict-resolution tasks that this land has made moot (hq-jnap).
+	// Conflict beads otherwise outlive the successful re-land of their content
+	// and rot as open issues (re-dlcs/re-4i3b/re-gcii pattern).
+	e.closeSupersededConflictArtifacts(mr)
+
 	// 1.5. Clear agent bead's active_mr reference (traceability cleanup)
 	if mr.AgentBead != "" {
 		if err := e.clearAgentActiveMR(mr.AgentBead); err != nil {
@@ -1519,6 +1525,55 @@ The Refinery will automatically retry the merge after you force-push.`,
 	return task.ID, nil
 }
 
+// closeSupersededConflictArtifacts closes conflict-resolution tasks made moot
+// by a successful land of the source issue (hq-jnap). Two cases:
+//  1. The merged MR's own conflict task is still open — the conflict was
+//     resolved out-of-band (force-push) without `bd close`, so the task rots.
+//  2. Another open MR carries the same source issue (a re-land) — its conflict
+//     task is now pointless because the content is on the target branch.
+//
+// Superseded sibling MRs themselves are logged but left open: closing them
+// automatically could hide a legitimate retry, and the witness/refinery queue
+// anomaly scan surfaces them for an explicit decision.
+// All operations are best-effort; failures are logged and don't affect the merge.
+func (e *Engineer) closeSupersededConflictArtifacts(merged *MRInfo) {
+	e.closeConflictTaskIfOpen(merged.ConflictTaskID, merged.ID, merged.SourceIssue)
+
+	if merged.SourceIssue == "" {
+		return
+	}
+	all, err := e.ListAllOpenMRs()
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: conflict-artifact sweep skipped (list MRs): %v\n", err)
+		return
+	}
+	for _, other := range all {
+		if other.ID == merged.ID || other.SourceIssue != merged.SourceIssue {
+			continue
+		}
+		e.closeConflictTaskIfOpen(other.ConflictTaskID, other.ID, merged.SourceIssue)
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Note: open MR %s shares source issue %s just merged via %s — likely superseded\n",
+			other.ID, merged.SourceIssue, merged.ID)
+	}
+}
+
+// closeConflictTaskIfOpen closes a conflict-resolution task if it is still open.
+func (e *Engineer) closeConflictTaskIfOpen(taskID, mrID, sourceIssue string) {
+	if taskID == "" {
+		return
+	}
+	open, _ := e.IsBeadOpen(taskID)
+	if !open {
+		return
+	}
+	reason := fmt.Sprintf("conflict moot: %s landed (MR %s)", sourceIssue, mrID)
+	if err := e.beads.CloseWithReason(reason, taskID); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close moot conflict task %s: %v\n", taskID, err)
+	} else {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Closed moot conflict task: %s (%s)\n", taskID, reason)
+	}
+}
+
 // IsBeadOpen checks if a bead is still open (not closed).
 // This is used as a status checker to filter blocked MRs.
 func (e *Engineer) IsBeadOpen(beadID string) (bool, error) {
@@ -1574,6 +1629,7 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 		Priority:        issue.Priority,
 		AgentBead:       fields.AgentBead,
 		RetryCount:      fields.RetryCount,
+		ConflictTaskID:  fields.ConflictTaskID,
 		ConvoyID:        fields.ConvoyID,
 		ConvoyCreatedAt: convoyCreatedAt,
 		PreVerified:     fields.PreVerified,
