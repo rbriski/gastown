@@ -436,6 +436,89 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 	},
 }
 
+var reaperCloseMonitorEscalationsCmd = &cobra.Command{
+	Use:   "close-monitor-escalations",
+	Short: "Close stale escalation wisps past max-age",
+	Long: `Close open wisps with wisp_type='escalation' that are older than max-age.
+
+Monitor/dog escalations (e.g. stuck-agent-dog) fire repeatedly and accumulate
+escalation wisps that inflate the open_wisps count. This fast-track closer
+(default 2h) clears them before they trigger the wisp-count alert threshold.
+The fingerprint dedup in gt escalate prevents new duplicates at creation time;
+this command handles ones already accumulated.
+
+When --db is provided, closes in a single database. When omitted,
+auto-discovers all databases on the Dolt server.
+
+Returns the count of closed wisps. Use --dry-run to preview.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		maxAge, err := time.ParseDuration(reaperMaxAge)
+		if err != nil {
+			return fmt.Errorf("invalid --max-age: %w", err)
+		}
+
+		databases := reaperDatabaseNames()
+
+		var results []*reaper.CloseMonitorEscalationsResult
+		for i, dbName := range databases {
+			if err := waitBeforeReaperDatabase(i); err != nil {
+				return err
+			}
+			if err := reaper.ValidateDBName(dbName); err != nil {
+				fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
+				continue
+			}
+
+			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
+				continue
+			}
+
+			if ok, err := reaper.HasReaperSchema(db); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: schema check error: %v\n", dbName, err)
+				db.Close()
+				continue
+			} else if !ok {
+				db.Close()
+				continue
+			}
+
+			result, err := reaper.CloseMonitorEscalations(db, dbName, maxAge, reaperDryRun)
+			db.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: close-monitor-escalations error: %v\n", dbName, err)
+				continue
+			}
+			results = append(results, result)
+		}
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(results))
+		} else {
+			var totalClosed int
+			for _, r := range results {
+				prefix := ""
+				if r.DryRun {
+					prefix = "[DRY RUN] would "
+				}
+				fmt.Printf("%s: %sclosed %d stale escalation wisps\n",
+					r.Database, prefix, r.Closed)
+				totalClosed += r.Closed
+			}
+			if len(results) > 1 {
+				prefix := ""
+				if reaperDryRun {
+					prefix = "[DRY RUN] "
+				}
+				fmt.Printf("\n%sClose-monitor-escalations summary (%d databases): closed %d escalation wisps\n",
+					prefix, len(results), totalClosed)
+			}
+		}
+		return nil
+	},
+}
+
 var reaperRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run full reaper cycle across all databases",

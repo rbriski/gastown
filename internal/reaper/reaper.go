@@ -944,6 +944,94 @@ func ClosePluginDispatches(db *sql.DB, dbName string, maxAge time.Duration, dryR
 	return result, nil
 }
 
+// CloseMonitorEscalationsResult holds the results of closing stale monitor escalations.
+type CloseMonitorEscalationsResult struct {
+	Database  string    `json:"database"`
+	Closed    int       `json:"closed"`
+	DryRun    bool      `json:"dry_run,omitempty"`
+	Anomalies []Anomaly `json:"anomalies,omitempty"`
+}
+
+// CloseMonitorEscalations closes open wisps with wisp_type='escalation' that are
+// older than maxAge. Escalation wisps accumulate from repeated monitor/dog alerts
+// (e.g. stuck-agent-dog firing every 5 min) and can inflate the open_wisps count
+// past the alert threshold, causing a self-perpetuating escalation loop. The
+// fingerprint dedup in `gt escalate` ensures at most one open escalation per
+// condition at creation time; this fast-track closer (default 2h vs Reap's 24h)
+// handles any that slip through and old ones from before fingerprinting landed.
+func CloseMonitorEscalations(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*CloseMonitorEscalationsResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
+	defer cancel()
+
+	cutoff := time.Now().UTC().Add(-maxAge)
+	result := &CloseMonitorEscalationsResult{Database: dbName, DryRun: dryRun}
+
+	// Find open escalation wisps older than maxAge.
+	selectQuery := "SELECT id FROM wisps WHERE status IN ('open', 'hooked', 'in_progress') AND wisp_type = 'escalation' AND created_at < ?"
+
+	rows, err := db.QueryContext(ctx, selectQuery, cutoff)
+	if err != nil {
+		if isTableNotFound(err) {
+			return result, nil
+		}
+		return nil, fmt.Errorf("select monitor escalations: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan escalation id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	result.Closed = len(ids)
+	if len(ids) == 0 || dryRun {
+		return result, nil
+	}
+
+	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
+		return nil, fmt.Errorf("disable autocommit: %w", err)
+	}
+	defer func() {
+		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
+	}()
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	updateQuery := fmt.Sprintf(
+		"UPDATE wisps SET status = 'closed', closed_at = NOW() WHERE id IN (%s)",
+		strings.Join(placeholders, ","))
+	if _, err := db.ExecContext(ctx, updateQuery, args...); err != nil {
+		return nil, fmt.Errorf("close monitor escalations: %w", err)
+	}
+
+	if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+		result.Anomalies = append(result.Anomalies, Anomaly{
+			Type:    "sql_commit_failed",
+			Message: fmt.Sprintf("sql commit after monitor escalation close failed: %v", err),
+		})
+		return result, nil
+	}
+	commitMsg := fmt.Sprintf("reaper: close %d monitor escalations in %s", len(ids), dbName)
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
+		if !isNothingToCommit(err) {
+			result.Anomalies = append(result.Anomalies, Anomaly{
+				Type:    "dolt_commit_failed",
+				Message: fmt.Sprintf("dolt commit after monitor escalation close failed: %v", err),
+			})
+		}
+	}
+
+	return result, nil
+}
+
 // FormatJSON marshals any value to indented JSON.
 func FormatJSON(v interface{}) string {
 	data, err := json.MarshalIndent(v, "", "  ")
