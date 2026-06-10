@@ -16,7 +16,6 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
-	gtlock "github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/util"
@@ -454,23 +453,22 @@ func (b *Beads) getResolvedBeadsDir() string {
 // targetBeadsDirForCreate returns the database a create operation should use.
 // Rig is authoritative for MR/conflict-task creates; otherwise parent-prefixed
 // children should land beside their parent so bd can resolve the relationship.
-func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) string {
+func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 	fallback := b.getResolvedBeadsDir()
 	townRoot := b.getTownRoot()
 
-	if opts.Rig != "" && townRoot != "" {
-		if rigDir := GetRigDirForName(townRoot, opts.Rig); rigDir != "" {
-			if targetDir := ResolveBeadsDir(rigDir); targetDir != "" {
-				return targetDir
-			}
+	if opts.Rig != "" {
+		if targetDir, ok := ResolveRepoAliasBeadsDir(townRoot, opts.Rig); ok {
+			return targetDir, nil
 		}
+		return "", fmt.Errorf("unknown repo/rig alias %q", opts.Rig)
 	}
 
 	if opts.Parent != "" {
-		return ResolveRoutingTarget(townRoot, opts.Parent, fallback)
+		return ResolveRoutingTarget(townRoot, opts.Parent, fallback), nil
 	}
 
-	return fallback
+	return fallback, nil
 }
 
 // forIssueID returns a Beads wrapper bound to the correct beads directory for
@@ -525,8 +523,6 @@ func (b *Beads) Init(prefix string) error {
 // Investigation: dc-1pq8 (forensic report 2026-05-02).
 const bdSubprocessTimeout = 60 * time.Second
 
-const bdReadThrottleTimeout = 5 * time.Second
-
 // resolveBdSubprocessTimeout returns the configured timeout, honoring the
 // GT_BD_TIMEOUT_SEC env var override (must parse as a positive integer).
 func resolveBdSubprocessTimeout() time.Duration {
@@ -565,15 +561,6 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir)
 	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
-	if shouldThrottleBDRead(fullArgs) {
-		unlock, err := b.acquireBDReadThrottle(bdReadThrottleTimeout)
-		if err != nil {
-			return nil, fmt.Errorf("bd %s: %w", strings.Join(fullArgs, " "), err)
-		}
-		if unlock != nil {
-			defer unlock()
-		}
-	}
 
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
@@ -636,42 +623,6 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) (_ []byte, retErr
 	}
 
 	return stripStdoutWarnings(stdout.Bytes()), nil
-}
-
-func shouldThrottleBDRead(args []string) bool {
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-		return arg == "list"
-	}
-	return false
-}
-
-func (b *Beads) acquireBDReadThrottle(timeout time.Duration) (func(), error) {
-	townRoot := b.getTownRoot()
-	if townRoot == "" {
-		return nil, nil
-	}
-	lockDir := filepath.Join(townRoot, ".runtime")
-	if err := os.MkdirAll(lockDir, 0755); err != nil {
-		return nil, err
-	}
-	lockPath := filepath.Join(lockDir, "bd-list-read.flock")
-	deadline := time.Now().Add(timeout)
-	for {
-		unlock, ok, err := gtlock.FlockTryAcquire(lockPath)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			return unlock, nil
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for bd list read throttle")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 }
 
 // runWithRouting executes a bd command without setting BEADS_DIR, allowing bd's
@@ -1406,7 +1357,10 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 		return nil, fmt.Errorf("refusing to create bead: %w (got %q)", ErrFlagTitle, opts.Title)
 	}
 
-	targetDir := b.targetBeadsDirForCreate(opts)
+	targetDir, err := b.targetBeadsDirForCreate(opts)
+	if err != nil {
+		return nil, err
+	}
 	if targetDir != "" && targetDir != b.getResolvedBeadsDir() {
 		bdForCreate := &Beads{
 			workDir:    b.workDir,
@@ -1476,6 +1430,20 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 	// Guard against flag-like titles (gt-e0kx5: --help garbage beads)
 	if IsFlagLikeTitle(opts.Title) {
 		return nil, fmt.Errorf("refusing to create bead: %w (got %q)", ErrFlagTitle, opts.Title)
+	}
+
+	targetDir, err := b.targetBeadsDirForCreate(opts)
+	if err != nil {
+		return nil, err
+	}
+	if targetDir != "" && targetDir != b.getResolvedBeadsDir() {
+		bdForCreate := &Beads{
+			workDir:    b.workDir,
+			beadsDir:   targetDir,
+			serverPort: b.serverPort,
+			isolated:   b.isolated,
+		}
+		return bdForCreate.CreateWithID(id, opts)
 	}
 
 	args := []string{"create", "--json", "--id=" + id}

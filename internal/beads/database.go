@@ -63,9 +63,9 @@ func StripBDTargetEnv(env []string) []string {
 }
 
 // BuildPinnedBDEnv returns env for a bd subprocess pinned to beadsDir. BEADS_DIR
-// is the authoritative database selector; inherited explicit database selectors
-// are stripped because bd 1.0.x can resolve a different/stale view when both are
-// present, making newly-created routed beads invisible to gt hook/sling.
+// and the metadata-backed Dolt database are the authoritative target selectors;
+// inherited selectors are stripped first so stale shell state cannot make bd
+// write to a different database than the selected .beads directory.
 func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
 	if beadsDir == "" {
@@ -73,6 +73,9 @@ func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 	}
 	env = append(env, "BEADS_DIR="+beadsDir)
 	env = append(env, doltTargetEnvFromBeadsDir(beadsDir)...)
+	if dbEnv := DatabaseEnv(beadsDir); dbEnv != "" {
+		env = append(env, dbEnv)
+	}
 	return addGTDerivedDoltTargetEnv(env)
 }
 
@@ -108,6 +111,14 @@ func BuildMutationPinnedBDEnv(base []string, beadsDir string) []string {
 // bd prefix routing instead of pinning BEADS_DIR.
 func BuildMutationRoutingBDEnv(base []string, fallbackBeadsDir string) []string {
 	return forceBDMutation(BuildRoutingBDEnv(base, fallbackBeadsDir))
+}
+
+// BuildMutationNeutralBDEnv returns env for a mutating bd subprocess whose argv
+// contains an explicit native target such as --repo=<path>. It strips inherited
+// Gas Town target selectors and suppresses side effects without adding BEADS_DIR
+// or town Dolt connection metadata that could change native bd path semantics.
+func BuildMutationNeutralBDEnv(base []string) []string {
+	return forceBDMutation(SuppressBDSideEffects(StripBDTargetEnv(base)))
 }
 
 // ArgsAreReadOnly classifies bd CLI arguments for env policy. Unknown commands
@@ -193,9 +204,6 @@ func doltTargetEnvFromBeadsDir(beadsDir string) []string {
 	}
 	meta := readDoltMetadata(beadsDir)
 	var env []string
-	if townRoot := FindTownRoot(filepath.Dir(beadsDir)); townRoot != "" {
-		env = append(env, "BEADS_DOLT_DATA_DIR="+filepath.Join(townRoot, ".dolt-data"))
-	}
 	if meta.Host != "" {
 		env = append(env, "BEADS_DOLT_SERVER_HOST="+meta.Host)
 	}
