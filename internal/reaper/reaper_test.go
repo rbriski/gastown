@@ -246,3 +246,66 @@ func TestScanExcludesAgentBeads(t *testing.T) {
 		t.Fatalf("expected Scan() eligibility to exclude agent beads, scan body was:\n%s", scanBody)
 	}
 }
+
+// TestCloseMonitorEscalationsTargetsWispType verifies that CloseMonitorEscalations
+// queries the wisps table using wisp_type='escalation', not the issues table.
+// This is the regression guard for the feedback loop fix (gt-r9qx): escalation
+// wisps from stuck-agent-dog must be closable by the reaper before they inflate
+// open_wisps past the alert threshold and trigger more escalations.
+func TestCloseMonitorEscalationsTargetsWispType(t *testing.T) {
+	sourcePath := "reaper.go"
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sourcePath, err)
+	}
+	source := string(data)
+	funcStart := strings.Index(source, "func CloseMonitorEscalations(")
+	if funcStart == -1 {
+		t.Fatal("CloseMonitorEscalations not found in reaper.go")
+	}
+	// Isolate the function body up to the next top-level func.
+	nextFunc := strings.Index(source[funcStart+1:], "\nfunc ")
+	var funcBody string
+	if nextFunc == -1 {
+		funcBody = source[funcStart:]
+	} else {
+		funcBody = source[funcStart : funcStart+1+nextFunc]
+	}
+
+	if !strings.Contains(funcBody, "wisp_type = 'escalation'") {
+		t.Error("CloseMonitorEscalations must filter on wisp_type = 'escalation'")
+	}
+	if !strings.Contains(funcBody, "FROM wisps") {
+		t.Error("CloseMonitorEscalations must query the wisps table, not issues")
+	}
+	if strings.Contains(funcBody, "FROM `%s`.issues") || strings.Contains(funcBody, "FROM issues i") {
+		t.Error("CloseMonitorEscalations must not query the issues table")
+	}
+}
+
+// TestCloseMonitorEscalationsNoPriorityGuard verifies that CloseMonitorEscalations
+// does NOT have the `priority > 1` guard that AutoClose has for issues. Escalation
+// wisps are ephemeral by nature and should be cleaned regardless of priority.
+func TestCloseMonitorEscalationsNoPriorityGuard(t *testing.T) {
+	sourcePath := "reaper.go"
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sourcePath, err)
+	}
+	source := string(data)
+	funcStart := strings.Index(source, "func CloseMonitorEscalations(")
+	if funcStart == -1 {
+		t.Fatal("CloseMonitorEscalations not found in reaper.go")
+	}
+	nextFunc := strings.Index(source[funcStart+1:], "\nfunc ")
+	var funcBody string
+	if nextFunc == -1 {
+		funcBody = source[funcStart:]
+	} else {
+		funcBody = source[funcStart : funcStart+1+nextFunc]
+	}
+
+	if strings.Contains(funcBody, "priority") {
+		t.Error("CloseMonitorEscalations must not filter on priority; escalation wisps are always closable")
+	}
+}

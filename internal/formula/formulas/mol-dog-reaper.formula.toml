@@ -10,9 +10,10 @@ these commands, inspects results, and uses judgment for anomalies.
 This is infrastructure cleanup work:
 1. Scan all production databases for candidates
 2. Reap (close) wisps past max_age whose parent is closed/missing
-3. Purge (delete) closed wisps past purge_age + old closed mail
-4. Auto-close stale issues (>stale_issue_age, not P0/P1, not epics, no active deps)
-5. Report findings and flag anomalies
+3. Close monitor escalation wisps (wisp_type='escalation', fast-track 2h TTL)
+4. Purge (delete) closed wisps past purge_age + old closed mail
+5. Auto-close stale issues (>stale_issue_age, not P0/P1, not epics, no active deps)
+6. Report findings and flag anomalies
 
 ## Variables
 
@@ -47,7 +48,7 @@ NOT anomalies (do NOT escalate these):
   race condition — the witness closes wisps for dead sessions concurrently.
   This is expected behavior, not a bug."""
 formula = "mol-dog-reaper"
-version = 2
+version = 3
 
 [squash]
 trigger = "on_complete"
@@ -79,7 +80,16 @@ gt reaper scan --db=<name> --port={{dolt_port}} \\
 - Check the `anomalies` array in the JSON output
 - Flag any `dangling_parent_ref` anomalies — these indicate wisps with
   parent dependency records pointing to purged/missing parents
-- If `open_wisps` exceeds {{alert_threshold}}, escalate
+- If `open_wisps` exceeds {{alert_threshold}}, escalate **with fingerprint** to prevent
+  the reaper itself from inflating the count further:
+  ```bash
+  gt escalate "Reaper: open_wisps=<N> exceeds threshold {{alert_threshold}}" \
+    -s MEDIUM --fingerprint "reaper:wisp-count-alert"
+  ```
+  Using `--fingerprint` ensures only one escalation bead exists for this condition.
+  Without it, each reaper run creates a new escalation wisp, inflating open_wisps
+  further and triggering more escalations — the feedback loop this formula is designed
+  to prevent.
 
 **4. Decide whether to proceed:**
 - If no candidates found across all databases, skip remaining steps
@@ -114,9 +124,37 @@ log a warning and consider escalating.
 **Exit criteria:** All stale wisps closed (or dry-run counts reported)."""
 
 [[steps]]
+id = "close-monitor-escalations"
+title = "Close stale monitor escalation wisps"
+needs = ["reap"]
+description = """
+Fast-track close open wisps with wisp_type='escalation' older than 2h.
+
+Monitor dogs (stuck-agent-dog, etc.) create escalation wisps on every run.
+Without dedup fingerprinting, these accumulate at ~288/day. Even with
+fingerprinting (one active escalation per condition), old wisps from before
+the fix or any that slipped through can inflate the open_wisps count.
+
+This step clears them fast (2h TTL vs Reap's 24h) before the purge step.
+
+**1. For each database:**
+```bash
+gt reaper close-monitor-escalations --db=<name> --port={{dolt_port}} \\
+  --max-age=2h --db-delay={{db_delay}} \\
+  {{#if dry_run}}--dry-run{{/if}} --json
+```
+
+**2. Inspect results:**
+- The `closed` count should match the number of old escalation wisps
+- A high count (>10) suggests fingerprinting may not be working in the
+  escalation source — file a bead to investigate
+
+**Exit criteria:** Stale escalation wisps closed."""
+
+[[steps]]
 id = "purge"
 title = "Purge old closed wisps and mail"
-needs = ["reap"]
+needs = ["close-monitor-escalations"]
 description = """
 Delete closed wisps past purge_age and closed mail past mail_delete_age.
 
@@ -173,6 +211,7 @@ Generate summary and signal completion.
 
 **Databases scanned**: (count)
 **Wisps reaped**: (total closed stale open wisps)
+**Escalation wisps closed**: (total closed by close-monitor-escalations step)
 **Wisps purged**: (total deleted old closed wisps)
 **Mail purged**: (total deleted old closed mail)
 **Issues auto-closed**: (stale > stale_issue_age, excl. epics/P0-P1/deps)
@@ -180,9 +219,11 @@ Generate summary and signal completion.
 **Anomalies**: (list any anomalies found)
 ```
 
-**2. If anomalies were found, escalate:**
+**2. If anomalies were found, escalate with fingerprint:**
 ```bash
-gt escalate "Reaper anomalies detected" -s MEDIUM -m "<anomaly details>"
+gt escalate "Reaper anomalies detected" -s MEDIUM \
+  --fingerprint "reaper:anomalies" \
+  -m "<anomaly details>"
 ```
 
 **Exit criteria:** Report generated, anomalies escalated if any."""
