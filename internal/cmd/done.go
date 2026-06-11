@@ -115,7 +115,7 @@ func shouldSyncIdlePolecatWorktree(exitType, mergeStrategy string, pushFailed, m
 }
 
 func cleanupStatusAfterSuccessfulPush(status string) string {
-	if status == "unpushed" {
+	if status == "unpushed" || status == "has_unpushed" {
 		return "clean"
 	}
 	return status

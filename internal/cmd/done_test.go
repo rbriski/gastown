@@ -512,6 +512,7 @@ func TestCleanupStatusAfterSuccessfulPush(t *testing.T) {
 		want   string
 	}{
 		{"unpushed", "clean"},
+		{"has_unpushed", "clean"},
 		{"clean", "clean"},
 		{"uncommitted", "uncommitted"},
 		{"stash", "stash"},
