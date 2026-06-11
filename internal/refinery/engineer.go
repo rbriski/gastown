@@ -1372,6 +1372,11 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	// If this was a conflict, create a conflict-resolution task for dispatch
 	// and block the MR until the task is resolved (non-blocking delegation)
 	if result.Conflict {
+		retryCount := mr.RetryCount + 1
+		conflictSHA, revErr := e.git.Rev("origin/" + mr.Target)
+		if revErr != nil {
+			conflictSHA = "unknown-sha"
+		}
 		taskID, err := e.createConflictResolutionTaskForMR(mr, result)
 		if err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to create conflict resolution task: %v\n", err)
@@ -1381,6 +1386,12 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 			if err := e.beads.AddDependency(mr.ID, taskID); err != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to block MR on task: %v\n", err)
 			} else {
+				if err := e.recordConflictTaskOnMR(mr, taskID, retryCount, conflictSHA); err != nil {
+					_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to record conflict task on MR %s: %v\n", mr.ID, err)
+				} else {
+					mr.ConflictTaskID = taskID
+					mr.RetryCount = retryCount
+				}
 				_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s blocked on conflict task %s (non-blocking delegation)\n", mr.ID, taskID)
 			}
 		}
@@ -1525,6 +1536,22 @@ The Refinery will automatically retry the merge after you force-push.`,
 	return task.ID, nil
 }
 
+func (e *Engineer) recordConflictTaskOnMR(mr *MRInfo, taskID string, retryCount int, conflictSHA string) error {
+	mrBead, err := e.beads.Show(mr.ID)
+	if err != nil {
+		return err
+	}
+	mrFields := beads.ParseMRFields(mrBead)
+	if mrFields == nil {
+		mrFields = &beads.MRFields{}
+	}
+	mrFields.ConflictTaskID = taskID
+	mrFields.RetryCount = retryCount
+	mrFields.LastConflictSHA = conflictSHA
+	newDesc := beads.SetMRFields(mrBead, mrFields)
+	return e.beads.Update(mr.ID, beads.UpdateOptions{Description: &newDesc})
+}
+
 // closeSupersededConflictArtifacts closes conflict-resolution tasks made moot
 // by a successful land of the source issue (hq-jnap). Two cases:
 //  1. The merged MR's own conflict task is still open — the conflict was
@@ -1532,12 +1559,11 @@ The Refinery will automatically retry the merge after you force-push.`,
 //  2. Another open MR carries the same source issue (a re-land) — its conflict
 //     task is now pointless because the content is on the target branch.
 //
-// Superseded sibling MRs themselves are logged but left open: closing them
-// automatically could hide a legitimate retry, and the witness/refinery queue
-// anomaly scan surfaces them for an explicit decision.
+// Superseded sibling MRs are closed only when their conflict task verifies it
+// belongs to that MR/source issue; this avoids unblocking stale duplicate MRs.
 // All operations are best-effort; failures are logged and don't affect the merge.
 func (e *Engineer) closeSupersededConflictArtifacts(merged *MRInfo) {
-	e.closeConflictTaskIfOpen(merged.ConflictTaskID, merged.ID, merged.SourceIssue)
+	e.closeConflictTaskIfOpen(merged.ConflictTaskID, merged.ID, merged.ID, merged.SourceIssue)
 
 	if merged.SourceIssue == "" {
 		return
@@ -1551,27 +1577,54 @@ func (e *Engineer) closeSupersededConflictArtifacts(merged *MRInfo) {
 		if other.ID == merged.ID || other.SourceIssue != merged.SourceIssue {
 			continue
 		}
-		e.closeConflictTaskIfOpen(other.ConflictTaskID, other.ID, merged.SourceIssue)
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Note: open MR %s shares source issue %s just merged via %s — likely superseded\n",
-			other.ID, merged.SourceIssue, merged.ID)
+		if !e.closeConflictTaskIfOpen(other.ConflictTaskID, other.ID, merged.ID, merged.SourceIssue) {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Note: open MR %s shares source issue %s just merged via %s, but had no verified conflict task to close\n",
+				other.ID, merged.SourceIssue, merged.ID)
+			continue
+		}
+		reason := fmt.Sprintf("superseded by %s", merged.ID)
+		if err := e.beads.CloseWithReason(reason, other.ID); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close superseded MR %s: %v\n", other.ID, err)
+		} else {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Closed superseded MR %s: %s\n", other.ID, reason)
+		}
 	}
 }
 
 // closeConflictTaskIfOpen closes a conflict-resolution task if it is still open.
-func (e *Engineer) closeConflictTaskIfOpen(taskID, mrID, sourceIssue string) {
+func (e *Engineer) closeConflictTaskIfOpen(taskID, taskMRID, landedMRID, sourceIssue string) bool {
 	if taskID == "" {
-		return
+		return false
 	}
-	open, _ := e.IsBeadOpen(taskID)
-	if !open {
-		return
+	task, err := e.beads.Show(taskID)
+	if err != nil || task == nil {
+		return false
 	}
-	reason := fmt.Sprintf("conflict moot: %s landed (MR %s)", sourceIssue, mrID)
+	if !isConflictTaskForMR(task, taskMRID, sourceIssue) {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: refusing to close unverified conflict task %s for MR %s\n", taskID, taskMRID)
+		return false
+	}
+	if task.Status == string(beads.StatusClosed) {
+		return true
+	}
+	reason := fmt.Sprintf("conflict moot: %s landed (MR %s)", sourceIssue, landedMRID)
 	if err := e.beads.CloseWithReason(reason, taskID); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close moot conflict task %s: %v\n", taskID, err)
+		return false
 	} else {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Closed moot conflict task: %s (%s)\n", taskID, reason)
 	}
+	return true
+}
+
+func isConflictTaskForMR(task *beads.Issue, mrID, sourceIssue string) bool {
+	if task == nil || task.Description == "" || mrID == "" {
+		return false
+	}
+	if !strings.Contains(task.Description, "- Original MR: "+mrID) {
+		return false
+	}
+	return sourceIssue == "" || strings.Contains(task.Description, "- Original issue: "+sourceIssue)
 }
 
 // IsBeadOpen checks if a bead is still open (not closed).

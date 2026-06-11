@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -471,19 +472,28 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// every write fails 'issue not found' and witness zombie detection +
 		// done-resume silently degrade. Best-effort: a failed recreate just
 		// leaves the existing warnings.
-		ensureAgentBeadExists(beads.New(cwd), agentBeadID, ctx)
+		ensureAgentBeadExists(beads.New(cwd).ForAgentBead(), agentBeadID, ctx)
 
 		// Persistent polecat model (gt-hdf8): no deferred session kill.
 		// Sessions stay alive after gt done — polecat transitions to IDLE.
+	}
+
+	var assignedIssueIDs []string
+	loadAssignedIssueIDs := func() []string {
+		if assignedIssueIDs == nil && sender != "" {
+			assignedIssueIDs = findAssignedBeadsForAgent(cwd, sender)
+		}
+		return assignedIssueIDs
 	}
 
 	// If issue ID not set by flag or branch name, query for hooked beads
 	// assigned to this agent. This replaces reading agent_bead.hook_bead
 	// (hq-l6mm5: direct bead tracking instead of agent bead slot).
 	if issueID == "" && sender != "" {
-		bd := beads.New(cwd)
-		if hookIssue := findHookedBeadForAgent(bd, sender); hookIssue != "" {
+		if hookIssue, ambiguous := selectAssignedIssue("", loadAssignedIssueIDs()); hookIssue != "" {
 			issueID = hookIssue
+		} else if ambiguous {
+			style.PrintWarning("multiple active assignments found for %s; cannot infer issue from hook. Use --issue to disambiguate.", sender)
 		}
 	}
 
@@ -495,12 +505,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// wins, and subtask branches of the hooked bead (e.g. gt-abc.1 under
 	// hooked gt-abc) are left alone.
 	if doneIssue == "" && info.Issue != "" && sender != "" {
-		bd := beads.New(cwd)
-		if hookIssue := findHookedBeadForAgent(bd, sender); isStaleBranchIssue(info.Issue, hookIssue) {
+		if hookIssue, ambiguous := selectAssignedIssue(info.Issue, loadAssignedIssueIDs()); isStaleBranchIssue(info.Issue, hookIssue) {
 			style.PrintWarning("branch %q embeds issue %s but your hooked bead is %s — submitting for %s (stale branch reuse?)", branch, info.Issue, hookIssue, hookIssue)
 			fmt.Printf("  Fresh branches must be named polecat/<name>/<bead-id>@<suffix> for the bead you are working.\n")
 			fmt.Printf("  Use --issue to override if the branch-derived id is actually correct.\n\n")
 			issueID = hookIssue
+		} else if ambiguous {
+			style.PrintWarning("branch %q embeds issue %s but %s has multiple active assignments; keeping branch issue. Use --issue to override.", branch, info.Issue, sender)
 		}
 	}
 
@@ -2049,8 +2060,8 @@ func ensureAgentBeadExists(bd *beads.Beads, id string, ctx RoleContext) {
 	if id == "" {
 		return
 	}
-	if issue, err := bd.Show(id); err == nil && issue != nil {
-		return // exists (open or closed — doctor handles reopening)
+	if issue, err := bd.Show(id); err == nil && issue != nil && issue.Status != string(beads.StatusClosed) {
+		return // exists and is active
 	}
 
 	fields := &beads.AgentFields{Rig: ctx.Rig, AgentState: "idle"}
@@ -2069,10 +2080,10 @@ func ensureAgentBeadExists(bd *beads.Beads, id string, ctx RoleContext) {
 		return
 	}
 
-	if _, err := bd.CreateAgentBead(id, title, fields); err != nil {
+	if _, err := bd.CreateOrReopenAgentBead(id, title, fields); err != nil {
 		style.PrintWarning("agent bead %s missing and recreate failed: %v", id, err)
 	} else {
-		fmt.Printf("%s Recreated missing agent bead: %s\n", style.Bold.Render("✓"), id)
+		fmt.Printf("%s Recreated/reopened missing agent bead: %s\n", style.Bold.Render("✓"), id)
 	}
 }
 
@@ -2087,6 +2098,108 @@ func isStaleBranchIssue(branchIssue, hookedIssue string) bool {
 	return branchIssue != hookedIssue && !strings.HasPrefix(branchIssue, hookedIssue+".")
 }
 
+// selectAssignedIssue returns the one authoritative assignment to use for
+// done attribution. Ambiguous assignment state is deliberately not guessed.
+func selectAssignedIssue(branchIssue string, assigned []string) (string, bool) {
+	unique := make(map[string]bool, len(assigned))
+	for _, id := range assigned {
+		if id != "" {
+			unique[id] = true
+		}
+	}
+	ids := make([]string, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	if len(ids) == 0 {
+		return "", false
+	}
+	if branchIssue != "" {
+		for _, id := range ids {
+			if branchIssue == id || strings.HasPrefix(branchIssue, id+".") {
+				return "", false
+			}
+		}
+	}
+	if len(ids) > 1 {
+		return "", true
+	}
+	return ids[0], false
+}
+
+// findAssignedBeadsForAgent queries the same assignment locations as gt hook:
+// the current rig, the target rig for rig agents, then town beads. The assigned
+// work bead is authoritative; agent-bead hook slots are intentionally ignored.
+func findAssignedBeadsForAgent(workDir, agentID string) []string {
+	if agentID == "" {
+		return nil
+	}
+
+	assigned := assignedIssueIDs(queryAssignedBeads(beads.New(workDir), agentID))
+	if len(assigned) > 0 {
+		return assigned
+	}
+
+	townRoot, err := findTownRoot()
+	if err != nil || townRoot == "" {
+		return nil
+	}
+
+	parts := strings.Split(agentID, "/")
+	rigName := ""
+	if len(parts) > 0 {
+		rigName = parts[0]
+	}
+	if rigName != "" && rigName != "mayor" && rigName != "deacon" {
+		rigWorkDir := filepath.Join(townRoot, rigName, "mayor", "rig")
+		if rigWorkDir != workDir {
+			assigned = assignedIssueIDs(queryAssignedBeads(beads.New(rigWorkDir), agentID))
+			if len(assigned) > 0 {
+				return assigned
+			}
+		}
+	}
+
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	if _, err := os.Stat(townBeadsDir); err == nil {
+		assigned = assignedIssueIDs(queryAssignedBeads(beads.New(townBeadsDir), agentID))
+		if len(assigned) > 0 {
+			return assigned
+		}
+	}
+	if isTownLevelRole(agentID) {
+		return assignedIssueIDs(scanAllRigsForHookedBeads(townRoot, agentID))
+	}
+	return nil
+}
+
+func queryAssignedBeads(bd *beads.Beads, agentID string) []*beads.Issue {
+	var out []*beads.Issue
+	for _, status := range []string{beads.StatusHooked, "in_progress"} {
+		assigned, err := bd.List(beads.ListOptions{
+			Status:   status,
+			Assignee: agentID,
+			Priority: -1,
+		})
+		if err == nil {
+			out = append(out, assigned...)
+		}
+	}
+	return out
+}
+
+func assignedIssueIDs(assigned []*beads.Issue) []string {
+	ids := make([]string, 0, len(assigned))
+	for _, issue := range assigned {
+		if issue != nil && issue.ID != "" {
+			ids = append(ids, issue.ID)
+		}
+	}
+	return ids
+}
+
 // findHookedBeadForAgent queries for the agent's current assignment bead.
 // This is the authoritative source for what work a polecat is doing, since the
 // work bead itself tracks status and assignee (hq-l6mm5).
@@ -2098,20 +2211,8 @@ func isStaleBranchIssue(branchIssue, hookedIssue string) bool {
 // gt-pftz in the close path). Hooked wins over in_progress when both exist.
 // Returns empty string if no assignment bead is found.
 func findHookedBeadForAgent(bd *beads.Beads, agentID string) string {
-	if agentID == "" {
-		return ""
-	}
-	for _, status := range []string{beads.StatusHooked, "in_progress"} {
-		assigned, err := bd.List(beads.ListOptions{
-			Status:   status,
-			Assignee: agentID,
-			Priority: -1,
-		})
-		if err == nil && len(assigned) > 0 {
-			return assigned[0].ID
-		}
-	}
-	return ""
+	issueID, _ := selectAssignedIssue("", assignedIssueIDs(queryAssignedBeads(bd, agentID)))
+	return issueID
 }
 
 // parseCleanupStatus converts a string flag value to a CleanupStatus.

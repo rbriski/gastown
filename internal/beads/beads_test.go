@@ -1330,6 +1330,21 @@ commit_sha: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2`,
 				CommitSHA:   "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 			},
 		},
+		{
+			name: "null optional fields are empty",
+			issue: &Issue{
+				Description: `branch: polecat/Nux/gt-null
+target: main
+source_issue: gt-null
+last_conflict_sha: null
+conflict_task_id: null`,
+			},
+			wantFields: &MRFields{
+				Branch:      "polecat/Nux/gt-null",
+				Target:      "main",
+				SourceIssue: "gt-null",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1370,6 +1385,12 @@ commit_sha: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2`,
 			}
 			if fields.CloseReason != tt.wantFields.CloseReason {
 				t.Errorf("CloseReason = %q, want %q", fields.CloseReason, tt.wantFields.CloseReason)
+			}
+			if fields.LastConflictSHA != tt.wantFields.LastConflictSHA {
+				t.Errorf("LastConflictSHA = %q, want %q", fields.LastConflictSHA, tt.wantFields.LastConflictSHA)
+			}
+			if fields.ConflictTaskID != tt.wantFields.ConflictTaskID {
+				t.Errorf("ConflictTaskID = %q, want %q", fields.ConflictTaskID, tt.wantFields.ConflictTaskID)
 			}
 		})
 	}

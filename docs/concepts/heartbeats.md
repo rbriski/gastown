@@ -1,21 +1,21 @@
 # Heartbeats
 
-Gas Town has **three distinct heartbeat stores**. They have different writers,
-different readers, and different staleness thresholds. Refreshing one does NOT
-refresh the others — confusing them causes false "stuck agent" escalations
-(see hq-qxl9: a Deacon refreshed its session heartbeat for 50 minutes while
-the file-mtime store aged past threshold, producing an escalation storm).
+Gas Town has **three distinct heartbeat stores**. They have different readers
+and thresholds, so Deacon heartbeat commands refresh the Deacon-specific stores
+together to avoid false "stuck agent" escalations (see hq-qxl9: a Deacon
+refreshed its session heartbeat while the file store aged past threshold).
 
 ## The three stores
 
 ### 1. Deacon heartbeat file — `<townRoot>/deacon/heartbeat.json`
 
-- **Written by:** `gt deacon heartbeat [action]` → `deacon.Touch()` /
-  `deacon.TouchWithAction()` (`internal/deacon/heartbeat.go`). Since hq-qxl9,
-  plain `gt heartbeat` also touches this file when `GT_ROLE=deacon`.
-- **Read by:** the stuck-agent-dog plugin (stats the file **mtime**, escalates
-  HIGH at >1200s) and the Go daemon (`deacon.ReadHeartbeat`, parses the
-  `timestamp` field; thresholds 5m stale / 20m very-stale → poke).
+- **Written by:** `gt deacon heartbeat [action]` and `gt heartbeat` when
+  `GT_ROLE=deacon` → `deacon.Touch()` / `deacon.TouchWithAction()`
+  (`internal/deacon/heartbeat.go`).
+- **Read by:** the stuck-agent-dog plugin (parses the JSON `timestamp`, falling
+  back to mtime for malformed legacy files, and cross-checks tmux activity
+  before escalating) and the Go daemon (`deacon.ReadHeartbeat`; thresholds 5m
+  stale / 20m very-stale → poke).
 - **Also touches:** the legacy `deacon/.deacon-heartbeat` mtime file for old
   shell scripts.
 
@@ -32,8 +32,8 @@ the file-mtime store aged past threshold, producing an escalation storm).
 - **Written by:** `gt mol await-signal` on each timeout/signal wake
   (`updateAgentHeartbeat` in `internal/cmd/molecule_await_signal.go`). A
   label rewrite is used because `bd agent heartbeat` was never shipped
-  (steveyegge/beads#2828). Since hq-qxl9, the Deacon's `gt heartbeat` also
-  syncs this label when it is >10 minutes stale.
+  (steveyegge/beads#2828). Deacon heartbeat commands also sync this label when
+  it is older than half of the stale threshold.
 - **Read by:** Witness second-order monitoring ("who watches the watchers"):
   Witnesses check the Deacon's bead activity and alert the Mayor if it looks
   unresponsive (>5 minutes per the patrol formula).
@@ -43,9 +43,9 @@ the file-mtime store aged past threshold, producing an escalation storm).
 
 ## Rules of thumb
 
-- **Deacon sessions:** `gt heartbeat` now refreshes all relevant stores
-  (session + file + throttled bead label). On older binaries, run
-  `gt deacon heartbeat` explicitly each patrol cycle.
+- **Deacon sessions:** `gt deacon heartbeat` refreshes the Deacon file and
+  throttled bead label. `gt heartbeat` also refreshes the session store and,
+  when `GT_ROLE=deacon`, uses the same Deacon file/label sync path.
 - **Polecats / Witness / Refinery:** `gt heartbeat` (session store) is the
   one that matters.
 - **Monitoring scripts:** never declare an agent stuck from a single store.

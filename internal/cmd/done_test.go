@@ -399,6 +399,58 @@ func TestFindHookedBeadForAgent(t *testing.T) {
 	}
 }
 
+func TestSelectAssignedIssue(t *testing.T) {
+	tests := []struct {
+		name        string
+		branchIssue string
+		assigned    []string
+		wantIssue   string
+		wantAmbig   bool
+	}{
+		{
+			name:      "single assignment selected",
+			assigned:  []string{"gt-real"},
+			wantIssue: "gt-real",
+		},
+		{
+			name:        "stale branch overridden by single assignment",
+			branchIssue: "gt-old",
+			assigned:    []string{"gt-real"},
+			wantIssue:   "gt-real",
+		},
+		{
+			name:        "branch matching assignment needs no override",
+			branchIssue: "gt-real",
+			assigned:    []string{"gt-real"},
+		},
+		{
+			name:        "subtask branch matching assignment needs no override",
+			branchIssue: "gt-real.1",
+			assigned:    []string{"gt-real"},
+		},
+		{
+			name:      "duplicate assignment ids collapse",
+			assigned:  []string{"gt-real", "gt-real"},
+			wantIssue: "gt-real",
+		},
+		{
+			name:      "multiple assignments are ambiguous",
+			assigned:  []string{"gt-b", "gt-a"},
+			wantAmbig: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIssue, gotAmbig := selectAssignedIssue(tt.branchIssue, tt.assigned)
+			if gotIssue != tt.wantIssue || gotAmbig != tt.wantAmbig {
+				t.Fatalf("selectAssignedIssue(%q, %v) = (%q, %v), want (%q, %v)",
+					tt.branchIssue, tt.assigned, gotIssue, gotAmbig, tt.wantIssue, tt.wantAmbig)
+			}
+		})
+	}
+}
+
 // TestIsStaleBranchIssue verifies the stale-branch guard (hq-l0fj): a
 // branch-derived issue id is overridden only when it conflicts with the
 // hooked bead and is not a subtask of it.

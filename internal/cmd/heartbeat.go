@@ -69,15 +69,12 @@ func runHeartbeat(cmd *cobra.Command, args []string) error {
 
 	polecat.TouchSessionHeartbeatWithState(townRoot, sessionName, state, context, "")
 
-	// The Deacon has a second liveness store: deacon/heartbeat.json, whose
-	// mtime is stat'd by stuck-agent-dog and the daemon. Touch it here too so
-	// a Deacon refreshing its session heartbeat can't trip the file-mtime
-	// staleness check (hq-qxl9: heartbeat store fragmentation).
+	// Deacon liveness has extra stores beyond session heartbeat. Keep the
+	// generic heartbeat command and `gt deacon heartbeat` on one shared path.
 	if os.Getenv("GT_ROLE") == "deacon" {
-		if err := deacon.Touch(townRoot); err != nil {
+		if err := syncDeaconHeartbeatStores(townRoot, context); err != nil {
 			fmt.Printf("warning: failed to touch deacon heartbeat file: %v\n", err)
 		}
-		syncDeaconAgentBeadHeartbeat(townRoot)
 	}
 
 	fmt.Printf("Heartbeat updated: state=%s\n", state)
@@ -87,7 +84,18 @@ func runHeartbeat(cmd *cobra.Command, args []string) error {
 // deaconBeadHeartbeatSyncThreshold throttles agent-bead label refreshes from
 // gt heartbeat: each refresh is a Dolt commit, so only sync when the label is
 // stale enough to matter to watchers.
-const deaconBeadHeartbeatSyncThreshold = 10 * time.Minute
+const deaconBeadHeartbeatSyncThreshold = deacon.HeartbeatStaleThreshold / 2
+
+func syncDeaconHeartbeatStores(townRoot, action string) error {
+	var err error
+	if action != "" {
+		err = deacon.TouchWithAction(townRoot, action, 0, 0)
+	} else {
+		err = deacon.Touch(townRoot)
+	}
+	syncDeaconAgentBeadHeartbeat(townRoot)
+	return err
+}
 
 // syncDeaconAgentBeadHeartbeat refreshes the heartbeat:EPOCH label on the
 // Deacon's agent bead — the third heartbeat store, read by Witness
