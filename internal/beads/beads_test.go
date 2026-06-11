@@ -1547,8 +1547,8 @@ Some existing prose content.`,
 			want: `branch: polecat/Nux/gt-new
 target: main
 source_issue: gt-new
-commit_sha: newsha
 worker: Nux
+commit_sha: newsha
 merge_commit: abc123
 
 Some existing prose content.`,
