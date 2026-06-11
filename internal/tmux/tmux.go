@@ -1874,14 +1874,23 @@ func (t *Tmux) AcceptStartupDialogs(session string) error {
 // still visible after dialog acceptance. These modals block automated sessions
 // from receiving or acting on the bootstrap prompt.
 func (t *Tmux) CheckStartupBlocked(session string) error {
-	content, err := t.CapturePane(session, 80)
-	if err != nil {
-		return err
+	deadline := time.Now().Add(constants.DialogPollTimeout)
+	var blocker string
+	for {
+		content, err := t.CapturePane(session, 80)
+		if err != nil {
+			return err
+		}
+		current, ok := containsBlockingStartupDialog(content)
+		if !ok {
+			return nil
+		}
+		blocker = current
+		if time.Now().After(deadline) {
+			return fmt.Errorf("interactive startup dialog still visible in %s: %s", session, blocker)
+		}
+		time.Sleep(constants.DialogPollInterval)
 	}
-	if blocker, ok := containsBlockingStartupDialog(content); ok {
-		return fmt.Errorf("interactive startup dialog still visible in %s: %s", session, blocker)
-	}
-	return nil
 }
 
 // AcceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
@@ -1935,6 +1944,9 @@ func containsWorkspaceTrustDialog(content string) bool {
 }
 
 func containsBlockingStartupDialog(content string) (string, bool) {
+	if promptAppearsAfterStartupBlocker(content) {
+		return "", false
+	}
 	if containsCodexUpdateDialog(content) {
 		return "codex update prompt", true
 	}
@@ -1947,6 +1959,37 @@ func containsBlockingStartupDialog(content string) (string, bool) {
 	return "", false
 }
 
+func promptAppearsAfterStartupBlocker(content string) bool {
+	promptLine := lastPromptIndicatorLine(content)
+	if promptLine < 0 {
+		return false
+	}
+	blockerLine := lastStartupBlockerLine(content)
+	return blockerLine >= 0 && promptLine > blockerLine
+}
+
+func lastStartupBlockerLine(content string) int {
+	markers := []string{
+		"Update available!",
+		"Update now",
+		"Skip until next version",
+		"trust this folder",
+		"Quick safety check",
+		"Do you trust the contents of this directory?",
+		"Bypass Permissions mode",
+	}
+	last := -1
+	for i, line := range strings.Split(content, "\n") {
+		for _, marker := range markers {
+			if strings.Contains(line, marker) {
+				last = i
+				break
+			}
+		}
+	}
+	return last
+}
+
 func containsCodexUpdateDialog(content string) bool {
 	return strings.Contains(content, "Update available!") &&
 		strings.Contains(content, "Update now") &&
@@ -1954,8 +1997,9 @@ func containsCodexUpdateDialog(content string) bool {
 }
 
 // promptSuffixes are strings that indicate a shell or agent prompt is visible.
-// Claude prompt ends with ">", shell prompts end with "$", "%", "#", or "❯".
-var promptSuffixes = []string{">", "$", "%", "#", "❯"}
+// Claude prompt ends with ">", Codex uses "›", and shells often end with
+// "$", "%", "#", or "❯".
+var promptSuffixes = []string{">", "›", "$", "%", "#", "❯"}
 
 // containsPromptIndicator checks if pane content contains a prompt indicator
 // that signals a shell or agent is ready (no dialog blocking it).
@@ -1972,6 +2016,23 @@ func containsPromptIndicator(content string) bool {
 		}
 	}
 	return false
+}
+
+func lastPromptIndicatorLine(content string) int {
+	last := -1
+	for i, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		for _, suffix := range promptSuffixes {
+			if strings.HasSuffix(trimmed, suffix) {
+				last = i
+				break
+			}
+		}
+	}
+	return last
 }
 
 // AcceptBypassPermissionsWarning dismisses the Claude Code bypass permissions warning dialog.

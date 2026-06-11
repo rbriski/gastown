@@ -3733,6 +3733,25 @@ func TestFillRuntimeDefaultsCodexDoesNotOverrideExplicitUpdateCheck(t *testing.T
 	}
 }
 
+func TestFillRuntimeDefaultsCodexIgnoresUnrelatedUpdateCheckSubstring(t *testing.T) {
+	rc := fillRuntimeDefaults(&RuntimeConfig{
+		Provider: "codex",
+		Command:  "codex",
+		Args:     []string{"--profile=check_for_update_on_startup-note"},
+	})
+
+	found := false
+	for _, arg := range rc.Args {
+		if arg == codexUpdateCheckConfig {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("codex update suppression should be injected despite unrelated substring: %v", rc.Args)
+	}
+}
+
 // TestBuildArgsWithPromptWarnsOnDroppedPrompt verifies the parallel warning in
 // BuildArgsWithPrompt when PromptMode is "none" and a non-empty prompt is provided.
 func TestBuildArgsWithPromptWarnsOnDroppedPrompt(t *testing.T) {

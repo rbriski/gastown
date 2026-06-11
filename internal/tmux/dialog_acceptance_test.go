@@ -181,6 +181,7 @@ func TestContainsPromptIndicator(t *testing.T) {
 		want    bool
 	}{
 		{"claude prompt", "Hello! How can I help?\n>", true},
+		{"codex prompt", "Ready\n› ", true},
 		{"bash prompt", "user@host:~$", true},
 		{"zsh prompt", "╰─❯", true},
 		{"root prompt", "root@host:~#", true},
@@ -256,6 +257,39 @@ Skip until next version`,
 			name:        "ready prompt",
 			content:     "› ",
 			wantBlocked: false,
+		},
+		{
+			name: "stale bypass dialog before codex prompt",
+			content: `Bypass Permissions mode
+1. No
+2. Yes, I accept
+› `,
+			wantBlocked: false,
+		},
+		{
+			name: "stale bypass dialog before prompt and status",
+			content: `Bypass Permissions mode
+1. No
+2. Yes, I accept
+›
+session ready`,
+			wantBlocked: false,
+		},
+		{
+			name: "stale trust dialog before shell prompt",
+			content: `Quick safety check
+Do you trust this folder?
+user@host:~$`,
+			wantBlocked: false,
+		},
+		{
+			name: "old shell prompt before current bypass dialog",
+			content: `user@host:~$
+Bypass Permissions mode
+1. No
+2. Yes, I accept`,
+			wantBlocked: true,
+			wantName:    "bypass permissions prompt",
 		},
 	}
 

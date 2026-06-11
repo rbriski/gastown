@@ -1040,7 +1040,8 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	return rc
 }
 
-const codexUpdateCheckConfig = "check_for_update_on_startup=false"
+const codexUpdateCheckKey = "check_for_update_on_startup"
+const codexUpdateCheckConfig = codexUpdateCheckKey + "=false"
 
 func ensureCodexAutomationArgs(command string, args []string) []string {
 	if !isCodexRuntime(command) || hasCodexUpdateCheckConfig(args) {
@@ -1058,7 +1059,7 @@ func isCodexRuntime(command string) bool {
 
 func hasCodexUpdateCheckConfig(args []string) bool {
 	for _, arg := range args {
-		if strings.Contains(arg, "check_for_update_on_startup") {
+		if arg == codexUpdateCheckKey || strings.HasPrefix(arg, codexUpdateCheckKey+"=") {
 			return true
 		}
 	}
