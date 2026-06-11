@@ -450,14 +450,13 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Determine polecat name from sender detection
 	sender := detectSender()
-	polecatName := ""
-	if parts := strings.Split(sender, "/"); len(parts) >= 2 {
-		polecatName = parts[len(parts)-1]
-	}
 
 	// Get agent bead ID for cross-referencing
 	var agentBeadID string
 	if roleInfo, err := GetRoleWithContext(cwd, townRoot); err == nil {
+		if actor := roleInfo.ActorString(); actor != "" {
+			sender = actor
+		}
 		ctx := RoleContext{
 			Role:     roleInfo.Role,
 			Rig:      roleInfo.Rig,
@@ -477,6 +476,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Persistent polecat model (gt-hdf8): no deferred session kill.
 		// Sessions stay alive after gt done — polecat transitions to IDLE.
 	}
+	polecatName := ""
+	if parts := strings.Split(sender, "/"); len(parts) >= 2 {
+		polecatName = parts[len(parts)-1]
+	}
 
 	var assignedIssueIDs []string
 	loadAssignedIssueIDs := func() []string {
@@ -493,7 +496,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		if hookIssue, ambiguous := selectAssignedIssue("", loadAssignedIssueIDs()); hookIssue != "" {
 			issueID = hookIssue
 		} else if ambiguous {
-			style.PrintWarning("multiple active assignments found for %s; cannot infer issue from hook. Use --issue to disambiguate.", sender)
+			return fmt.Errorf("multiple active assignments found for %s; cannot infer issue from hook. Use --issue to disambiguate", sender)
 		}
 	}
 
@@ -511,7 +514,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			fmt.Printf("  Use --issue to override if the branch-derived id is actually correct.\n\n")
 			issueID = hookIssue
 		} else if ambiguous {
-			style.PrintWarning("branch %q embeds issue %s but %s has multiple active assignments; keeping branch issue. Use --issue to override.", branch, info.Issue, sender)
+			return fmt.Errorf("branch %q embeds issue %s but %s has multiple active assignments; use --issue to disambiguate", branch, info.Issue, sender)
 		}
 	}
 
@@ -2176,18 +2179,23 @@ func findAssignedBeadsForAgent(workDir, agentID string) []string {
 }
 
 func queryAssignedBeads(bd *beads.Beads, agentID string) []*beads.Issue {
-	var out []*beads.Issue
-	for _, status := range []string{beads.StatusHooked, "in_progress"} {
-		assigned, err := bd.List(beads.ListOptions{
-			Status:   status,
-			Assignee: agentID,
-			Priority: -1,
-		})
-		if err == nil {
-			out = append(out, assigned...)
-		}
+	hooked, err := bd.List(beads.ListOptions{
+		Status:   beads.StatusHooked,
+		Assignee: agentID,
+		Priority: -1,
+	})
+	if err == nil && len(hooked) > 0 {
+		return hooked
 	}
-	return out
+	inProgress, err := bd.List(beads.ListOptions{
+		Status:   "in_progress",
+		Assignee: agentID,
+		Priority: -1,
+	})
+	if err == nil {
+		return inProgress
+	}
+	return nil
 }
 
 func assignedIssueIDs(assigned []*beads.Issue) []string {

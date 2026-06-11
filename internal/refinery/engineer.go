@@ -1621,10 +1621,28 @@ func isConflictTaskForMR(task *beads.Issue, mrID, sourceIssue string) bool {
 	if task == nil || task.Description == "" || mrID == "" {
 		return false
 	}
-	if !strings.Contains(task.Description, "- Original MR: "+mrID) {
+	metadata := conflictTaskMetadata(task.Description)
+	if metadata["Original MR"] != mrID {
 		return false
 	}
-	return sourceIssue == "" || strings.Contains(task.Description, "- Original issue: "+sourceIssue)
+	return sourceIssue == "" || metadata["Original issue"] == sourceIssue
+}
+
+func conflictTaskMetadata(description string) map[string]string {
+	metadata := make(map[string]string)
+	for _, line := range strings.Split(description, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "-"))
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			metadata[key] = value
+		}
+	}
+	return metadata
 }
 
 // IsBeadOpen checks if a bead is still open (not closed).

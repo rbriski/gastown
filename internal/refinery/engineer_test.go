@@ -59,6 +59,12 @@ func TestIsConflictTaskForMR(t *testing.T) {
 	if isConflictTaskForMR(task, "gt-mr1", "gt-other") {
 		t.Fatal("task verified for wrong source issue")
 	}
+	if isConflictTaskForMR(task, "gt-mr", "gt-real") {
+		t.Fatal("task verified for MR prefix")
+	}
+	if isConflictTaskForMR(task, "gt-mr1", "gt-rea") {
+		t.Fatal("task verified for source issue prefix")
+	}
 }
 
 func TestEngineerClearAgentActiveMRUsesTownBeadsDir(t *testing.T) {

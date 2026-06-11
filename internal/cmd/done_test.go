@@ -429,6 +429,11 @@ func TestSelectAssignedIssue(t *testing.T) {
 			assigned:    []string{"gt-real"},
 		},
 		{
+			name:        "branch matching one of multiple assignments needs no override",
+			branchIssue: "gt-real",
+			assigned:    []string{"gt-real", "gt-other"},
+		},
+		{
 			name:      "duplicate assignment ids collapse",
 			assigned:  []string{"gt-real", "gt-real"},
 			wantIssue: "gt-real",
