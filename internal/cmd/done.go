@@ -114,6 +114,13 @@ func shouldSyncIdlePolecatWorktree(exitType, mergeStrategy string, pushFailed, m
 	return mergeStrategy != "local"
 }
 
+func cleanupStatusAfterSuccessfulPush(status string) string {
+	if status == "unpushed" {
+		return "clean"
+	}
+	return status
+}
+
 func init() {
 	doneCmd.Flags().StringVar(&doneIssue, "issue", "", "Source issue ID (default: parse from branch name)")
 	doneCmd.Flags().IntVarP(&donePriority, "priority", "p", -1, "Override priority (0-4, default: inherit from issue)")
@@ -774,6 +781,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				goto notifyWitness
 			}
 			fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
+			doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
 
 			// Close the base issue — no MR/refinery will close it
 			if issueID != "" {
@@ -898,9 +906,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 		// Fix cleanup_status after successful push (gt-wcr).
 		// Status was detected before push, so "unpushed" is now stale.
-		if doneCleanupStatus == "unpushed" {
-			doneCleanupStatus = "clean"
-		}
+		doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
 
 		// Write push checkpoint for resume (gt-aufru)
 		if agentBeadID != "" {
@@ -1085,6 +1091,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					goto notifyWitness
 				}
 				fmt.Printf("%s Branch pushed directly to %s\n", style.Bold.Render("✓"), defaultBranch)
+				doneCleanupStatus = cleanupStatusAfterSuccessfulPush(doneCleanupStatus)
 
 				// Close the issue directly — refinery won't process it.
 				if issueID != "" {

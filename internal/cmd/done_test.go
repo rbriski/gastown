@@ -506,6 +506,27 @@ func TestShouldSyncIdlePolecatWorktree(t *testing.T) {
 	}
 }
 
+func TestCleanupStatusAfterSuccessfulPush(t *testing.T) {
+	tests := []struct {
+		status string
+		want   string
+	}{
+		{"unpushed", "clean"},
+		{"clean", "clean"},
+		{"uncommitted", "uncommitted"},
+		{"stash", "stash"},
+		{"unknown", "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			if got := cleanupStatusAfterSuccessfulPush(tt.status); got != tt.want {
+				t.Errorf("cleanupStatusAfterSuccessfulPush(%q) = %q, want %q", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestClearDoneIntentLabel verifies that clearDoneIntentLabel removes
 // only done-intent labels while preserving other labels.
 func TestClearDoneIntentLabel(t *testing.T) {
