@@ -661,7 +661,7 @@ func writeJSON(path string, data interface{}) error {
 func buildBdInitArgs(townPath string) []string {
 	cfg := doltserver.DefaultConfig(townPath)
 	return []string{"init", "--prefix", "hq", "--server",
-		"--server-port", strconv.Itoa(cfg.Port), "--force"}
+		"--server-port", strconv.Itoa(cfg.Port)}
 }
 
 // initTownBeads initializes town-level beads database using bd init.
