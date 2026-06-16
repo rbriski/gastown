@@ -118,19 +118,29 @@ func (d *Daemon) syncDoltBackups() {
 // retrying once on failure so a transient lock or large delta does not fail the
 // cycle (gt-ye21).
 func (d *Daemon) syncBackup(dataDir, db, backupName string) error {
-	dbDir := dataDir + "/" + db
+	parentCtx := d.ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	dbDir := filepath.Join(dataDir, db)
 
 	var lastErr error
 	for attempt := 0; attempt <= doltBackupRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(doltBackupRetryDelay)
 			d.logger.Printf("dolt_backup: %s: retry %d/%d after error: %v", db, attempt, doltBackupRetries, lastErr)
+			timer := time.NewTimer(doltBackupRetryDelay)
+			select {
+			case <-timer.C:
+			case <-parentCtx.Done():
+				timer.Stop()
+				return parentCtx.Err()
+			}
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), doltBackupTimeout)
+		ctx, cancel := context.WithTimeout(parentCtx, doltBackupTimeout)
 		cmd := exec.CommandContext(ctx, "dolt", "backup", "sync", backupName)
 		cmd.Dir = dbDir
-		util.SetDetachedProcessGroup(cmd)
+		util.SetProcessGroup(cmd)
 
 		output, err := cmd.CombinedOutput()
 		cancel()

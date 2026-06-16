@@ -104,9 +104,8 @@ func (dm *dogMol) closeStep(stepSlug string) {
 		return
 	}
 
-	_, err := dm.runBd("close", stepID)
-	if err != nil {
-		dm.logger.Printf("dog_molecule: close step %s (%s) failed (non-fatal): %v", stepSlug, stepID, err)
+	if err := dm.closeWisp(stepID); err != nil {
+		dm.logger.Printf("dog_molecule: close step %s (%s) failed after %d attempts (non-fatal): %v", stepSlug, stepID, dogCloseMaxAttempts, err)
 		return
 	}
 }
@@ -123,9 +122,8 @@ func (dm *dogMol) failStep(stepSlug, reason string) {
 		return
 	}
 
-	_, err := dm.runBd("close", stepID, "--reason", reason)
-	if err != nil {
-		dm.logger.Printf("dog_molecule: fail step %s (%s) failed (non-fatal): %v", stepSlug, stepID, err)
+	if err := dm.closeWisp(stepID, "--reason", reason); err != nil {
+		dm.logger.Printf("dog_molecule: fail step %s (%s) failed after %d attempts (non-fatal): %v", stepSlug, stepID, dogCloseMaxAttempts, err)
 	}
 }
 
