@@ -95,6 +95,21 @@ rig_bead_status() {
     | jq -r '.[0].status // empty' 2>/dev/null || true
 }
 
+bead_restartable() {
+  local session="$1" rig="$2" bead="$3" status=""
+
+  status=$(rig_bead_status "$rig" "$bead")
+
+  case "$status" in
+    open|hooked|in_progress) return 0 ;;
+    closed) log "  SKIP $session: bead closed (completed normally)" ;;
+    "") log "  SKIP $session: hook=$bead status unavailable" ;;
+    *) log "  SKIP $session: hook=$bead status=$status not actionable" ;;
+  esac
+
+  return 1
+}
+
 # --- Enumerate agents ---------------------------------------------------------
 
 log "=== Checking agent health ==="
@@ -131,26 +146,19 @@ while IFS='|' read -r RIG PREFIX; do
       # Session dead — check hook
       HOOK_BEAD=$(rig_hook_bead "$RIG" "$PCAT_NAME")
 
-      if [ -n "$HOOK_BEAD" ]; then
-        BEAD_STATUS=$(rig_bead_status "$RIG" "$HOOK_BEAD")
-
-        case "$BEAD_STATUS" in
-          closed) log "  SKIP $SESSION_NAME: bead closed (completed normally)"; continue ;;
-          "") log "  SKIP $SESSION_NAME: hook=$HOOK_BEAD status unavailable"; continue ;;
-        esac
-
+      if [ -n "$HOOK_BEAD" ] && bead_restartable "$SESSION_NAME" "$RIG" "$HOOK_BEAD"; then
         CRASHED+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD")
         log "  CRASHED: $SESSION_NAME (hook=$HOOK_BEAD)"
       fi
     else
       # Session alive — check process
-      PANE_PID=$(tmux list-panes -t "$SESSION_NAME" -F '#{pane_pid}' 2>/dev/null | head -1)
+      PANE_PID=$(tmux list-panes -t "$SESSION_NAME" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
       if [ -n "$PANE_PID" ]; then
-        PROC_COMM=$(ps -o comm= -p "$PANE_PID" 2>/dev/null)
+        PROC_COMM=$(ps -o comm= -p "$PANE_PID" 2>/dev/null || true)
         if [ -z "$PROC_COMM" ]; then
           # Zombie: process dead, session alive
           HOOK_BEAD=$(rig_hook_bead "$RIG" "$PCAT_NAME")
-          if [ -n "$HOOK_BEAD" ]; then
+          if [ -n "$HOOK_BEAD" ] && bead_restartable "$SESSION_NAME" "$RIG" "$HOOK_BEAD"; then
             STUCK+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD|agent_dead")
             log "  ZOMBIE: $SESSION_NAME (pid=$PANE_PID dead, hook=$HOOK_BEAD)"
           fi
@@ -181,8 +189,8 @@ if ! tmux has-session -t "$DEACON_SESSION" 2>/dev/null; then
   log "  CRASHED: Deacon session is dead"
   DEACON_ISSUE="crashed"
 else
-  DEACON_PID=$(tmux list-panes -t "$DEACON_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1)
-  DEACON_COMM=$(ps -o comm= -p "$DEACON_PID" 2>/dev/null)
+  DEACON_PID=$(tmux list-panes -t "$DEACON_SESSION" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
+  DEACON_COMM=$(ps -o comm= -p "$DEACON_PID" 2>/dev/null || true)
   if [ -z "$DEACON_COMM" ]; then
     log "  ZOMBIE: Deacon process dead (pid=$DEACON_PID), session alive"
     DEACON_ISSUE="zombie"
@@ -203,7 +211,7 @@ else
       # recent activity means the file-write path diverged (e.g. a long
       # turn, or the agent refreshing a different store) — not a stuck
       # Deacon. Escalating that as stuck caused a false-positive storm.
-      ACTIVITY_TIME=$(tmux display-message -t "$DEACON_SESSION" -p '#{window_activity}' 2>/dev/null)
+      ACTIVITY_TIME=$(tmux display-message -t "$DEACON_SESSION" -p '#{window_activity}' 2>/dev/null || true)
       case "$ACTIVITY_TIME" in
         ''|*[!0-9]*) ACTIVITY_AGE="" ;;
         *) ACTIVITY_AGE=$(( NOW - ACTIVITY_TIME )) ;;
