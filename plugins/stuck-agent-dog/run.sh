@@ -32,12 +32,11 @@ heartbeat_epoch() {
 has_in_progress_work() {
   local locations=("$TOWN_ROOT")
   local rig=""
-  local prefix=""
   local loc=""
   local output=""
   local count=""
 
-  while IFS='|' read -r rig prefix; do
+  while IFS='|' read -r rig _prefix; do
     [ -z "$rig" ] && continue
     [ -d "$TOWN_ROOT/$rig" ] && locations+=("$TOWN_ROOT/$rig")
   done <<< "$RIG_PREFIX_MAP"
@@ -54,23 +53,46 @@ has_in_progress_work() {
 }
 
 # --- Beads resolution helpers -------------------------------------------------
-# The plugin runs from the dog's cwd, which is NOT a beads workspace. `gt hook
-# show` and `bd` resolve the beads database from the CWD, so they must run from
-# the target rig's directory to hit that rig's database — otherwise they fail
-# with "not in a beads workspace" / "no beads database found". Each helper runs
-# in a subshell cd'd into the rig dir and is non-fatal: a rig whose beads cannot
-# be resolved (e.g. an inactive rig) is skipped instead of aborting the whole
-# plugin under `set -e` (hq-9e770).
+# Plugin scripts may run outside a beads workspace. Resolve hook and status
+# lookups from the target rig workspace, and make missing/inactive rigs
+# non-fatal so one bad rig does not abort the dog under `set -e` (hq-9e770).
 
-rig_hook_line() {
-  local rig="$1" pcat="$2"
-  ( cd "$TOWN_ROOT/$rig" 2>/dev/null && gt hook show "$rig/polecats/$pcat" 2>/dev/null | head -1 ) || true
+rig_workdir() {
+  local rig="$1"
+
+  if [ -d "$TOWN_ROOT/$rig/mayor/rig" ]; then
+    printf '%s\n' "$TOWN_ROOT/$rig/mayor/rig"
+    return 0
+  fi
+
+  if [ -d "$TOWN_ROOT/$rig" ]; then
+    printf '%s\n' "$TOWN_ROOT/$rig"
+    return 0
+  fi
+
+  return 1
+}
+
+rig_hook_bead() {
+  local rig="$1" pcat="$2" dir=""
+
+  if ! dir=$(rig_workdir "$rig"); then
+    return 0
+  fi
+
+  ( cd "$dir" 2>/dev/null && gt hook show "$rig/polecats/$pcat" --json 2>/dev/null ) \
+    | jq -r '.bead_id // empty' 2>/dev/null || true
 }
 
 rig_bead_status() {
-  local rig="$1" bead="$2"
-  ( cd "$TOWN_ROOT/$rig" 2>/dev/null && bd show "$bead" --json 2>/dev/null ) \
-    | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('status','') if d else '')" 2>/dev/null || echo ""
+  local rig="$1" bead="$2" dir=""
+
+  if ! dir=$(rig_workdir "$rig"); then
+    return 0
+  fi
+
+  ( cd "$dir" 2>/dev/null && bd show "$bead" --json 2>/dev/null ) \
+    | jq -r '.[0].status // empty' 2>/dev/null || true
 }
 
 # --- Enumerate agents ---------------------------------------------------------
@@ -107,15 +129,14 @@ while IFS='|' read -r RIG PREFIX; do
 
     if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
       # Session dead — check hook
-      HOOK_OUTPUT=$(rig_hook_line "$RIG" "$PCAT_NAME")
-      HOOK_BEAD=$(echo "$HOOK_OUTPUT" | grep -v '(empty)' | awk '{print $2}' || true)
+      HOOK_BEAD=$(rig_hook_bead "$RIG" "$PCAT_NAME")
 
       if [ -n "$HOOK_BEAD" ]; then
-        # Check agent_state
-        AGENT_STATE=$(rig_bead_status "$RIG" "$HOOK_BEAD")
+        BEAD_STATUS=$(rig_bead_status "$RIG" "$HOOK_BEAD")
 
-        case "$AGENT_STATE" in
+        case "$BEAD_STATUS" in
           closed) log "  SKIP $SESSION_NAME: bead closed (completed normally)"; continue ;;
+          "") log "  SKIP $SESSION_NAME: hook=$HOOK_BEAD status unavailable"; continue ;;
         esac
 
         CRASHED+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD")
@@ -128,8 +149,7 @@ while IFS='|' read -r RIG PREFIX; do
         PROC_COMM=$(ps -o comm= -p "$PANE_PID" 2>/dev/null)
         if [ -z "$PROC_COMM" ]; then
           # Zombie: process dead, session alive
-          HOOK_OUTPUT=$(rig_hook_line "$RIG" "$PCAT_NAME")
-          HOOK_BEAD=$(echo "$HOOK_OUTPUT" | grep -v '(empty)' | awk '{print $2}' || true)
+          HOOK_BEAD=$(rig_hook_bead "$RIG" "$PCAT_NAME")
           if [ -n "$HOOK_BEAD" ]; then
             STUCK+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD|agent_dead")
             log "  ZOMBIE: $SESSION_NAME (pid=$PANE_PID dead, hook=$HOOK_BEAD)"
