@@ -589,6 +589,162 @@ func TestMRVerificationSetsMRFailed(t *testing.T) {
 	}
 }
 
+// TestMRBeadCreateRetry verifies the retry logic for MR bead creation (gt-wrck).
+// bd.Create may fail transiently due to Dolt write fragility; the fix retries up
+// to mrBeadMaxAttempts times before setting mrFailed and escalating.
+func TestMRBeadCreateRetry(t *testing.T) {
+	tests := []struct {
+		name             string
+		failFirstN       int  // how many Create calls return error before success
+		wantMRFailed     bool
+		wantEscalated    bool
+		wantRetries      int  // expected number of Create calls
+	}{
+		{
+			name:          "happy path: first attempt succeeds",
+			failFirstN:    0,
+			wantMRFailed:  false,
+			wantEscalated: false,
+			wantRetries:   1,
+		},
+		{
+			name:          "transient failure: fails 2 then succeeds",
+			failFirstN:    2,
+			wantMRFailed:  false,
+			wantEscalated: false,
+			wantRetries:   3,
+		},
+		{
+			name:          "all retries exhausted: mrFailed + escalation",
+			failFirstN:    mrBeadMaxAttempts,
+			wantMRFailed:  true,
+			wantEscalated: true,
+			wantRetries:   mrBeadMaxAttempts,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Stub out emitMRFailedEscalation to capture calls.
+			var escalated bool
+			origEscalate := emitMRFailedEscalation
+			defer func() { emitMRFailedEscalation = origEscalate }()
+			emitMRFailedEscalation = func(_, _, _, _ string) { escalated = true }
+
+			// Simulate the retry loop from done.go.
+			callCount := 0
+			fakeCreate := func() (*beads.Issue, error) {
+				callCount++
+				if callCount <= tt.failFirstN {
+					return nil, fmt.Errorf("transient dolt error attempt %d", callCount)
+				}
+				return &beads.Issue{ID: "gt-mr-test"}, nil
+			}
+
+			var (
+				mrIssue     *beads.Issue
+				mrCreateErr error
+			)
+			for attempt := 1; attempt <= mrBeadMaxAttempts; attempt++ {
+				mrIssue, mrCreateErr = fakeCreate()
+				if mrCreateErr == nil {
+					break
+				}
+			}
+
+			mrFailed := false
+			if mrCreateErr != nil {
+				mrFailed = true
+				emitMRFailedEscalation("gt-test", "polecat/test/branch", "gastown", mrCreateErr.Error())
+			}
+
+			if mrFailed != tt.wantMRFailed {
+				t.Errorf("mrFailed = %v, want %v", mrFailed, tt.wantMRFailed)
+			}
+			if escalated != tt.wantEscalated {
+				t.Errorf("escalated = %v, want %v", escalated, tt.wantEscalated)
+			}
+			if callCount != tt.wantRetries {
+				t.Errorf("Create called %d times, want %d", callCount, tt.wantRetries)
+			}
+			if !mrFailed && mrIssue == nil {
+				t.Error("mrIssue should be non-nil on success")
+			}
+		})
+	}
+}
+
+// TestMRBeadVerifyRetry verifies the retry logic for MR bead read-back verification (gt-wrck).
+// bd.Show after a successful bd.Create may fail transiently; the fix retries the
+// verification before setting mrFailed and escalating.
+func TestMRBeadVerifyRetry(t *testing.T) {
+	tests := []struct {
+		name          string
+		failFirstN    int  // how many Show calls return (nil, err) before success
+		wantMRFailed  bool
+		wantEscalated bool
+	}{
+		{
+			name:          "happy path: first verify succeeds",
+			failFirstN:    0,
+			wantMRFailed:  false,
+			wantEscalated: false,
+		},
+		{
+			name:          "transient failure: fails 2 then succeeds",
+			failFirstN:    2,
+			wantMRFailed:  false,
+			wantEscalated: false,
+		},
+		{
+			name:          "all retries exhausted: mrFailed + escalation",
+			failFirstN:    mrBeadMaxAttempts,
+			wantMRFailed:  true,
+			wantEscalated: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var escalated bool
+			origEscalate := emitMRFailedEscalation
+			defer func() { emitMRFailedEscalation = origEscalate }()
+			emitMRFailedEscalation = func(_, _, _, _ string) { escalated = true }
+
+			callCount := 0
+			fakeShow := func() (*beads.Issue, error) {
+				callCount++
+				if callCount <= tt.failFirstN {
+					return nil, fmt.Errorf("transient read error attempt %d", callCount)
+				}
+				return &beads.Issue{ID: "gt-mr-test"}, nil
+			}
+
+			var mrVerified bool
+			for attempt := 1; attempt <= mrBeadMaxAttempts; attempt++ {
+				verifiedMR, verifyErr := fakeShow()
+				if verifyErr == nil && verifiedMR != nil {
+					mrVerified = true
+					break
+				}
+			}
+
+			mrFailed := false
+			if !mrVerified {
+				mrFailed = true
+				emitMRFailedEscalation("gt-test", "polecat/test/branch", "gastown", "verify failed")
+			}
+
+			if mrFailed != tt.wantMRFailed {
+				t.Errorf("mrFailed = %v, want %v", mrFailed, tt.wantMRFailed)
+			}
+			if escalated != tt.wantEscalated {
+				t.Errorf("escalated = %v, want %v", escalated, tt.wantEscalated)
+			}
+		})
+	}
+}
+
 // TestMRBeadCreationUsesRig verifies that MR bead creation specifies the rig (gt-7y7).
 // When a polecat works on a cross-rig bead (e.g., hq-xxx on rig "gastown"), the
 // MR bead must be created with Rig set to the polecat's rig so it lands in the

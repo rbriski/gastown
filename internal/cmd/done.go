@@ -76,6 +76,28 @@ const (
 	ExitDeferred  = "DEFERRED"
 )
 
+// mrBeadMaxAttempts and mrBeadRetryDelay control retries for MR bead creation
+// and read-back verification (gt-wrck). Three attempts with linear backoff
+// (500ms, 1000ms) mirrors the polecat manager's agent-bead retry idiom.
+const (
+	mrBeadMaxAttempts = 3
+	mrBeadRetryDelay  = 500 * time.Millisecond
+)
+
+// emitMRFailedEscalation fires a HIGH-severity escalation when MR bead
+// creation/verification fails after all retries (gt-wrck). Declared as a
+// function variable so tests can stub it without spawning a real gt process.
+var emitMRFailedEscalation = func(issueID, branch, rigName, detail string) {
+	msg := fmt.Sprintf(
+		"MR bead failed after retries: issue=%s branch=%s rig=%s — branch is pushed but needs MR bead or PR. Detail: %s",
+		issueID, branch, rigName, detail,
+	)
+	cmd := exec.Command("gt", "escalate", "--severity", "high", "--reason", "mr-bead-failed", msg)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "gt done: MR-failed escalation failed: %v\n", err)
+	}
+}
+
 func doneContaminationBaseRef(defaultBranch, explicitTarget string) string {
 	targetBranch := defaultBranch
 	if explicitTarget != "" {
@@ -1224,22 +1246,37 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				}
 			}
 
-			mrIssue, err := bd.Create(beads.CreateOptions{
-				Title:       title,
-				Labels:      []string{"gt:merge-request"},
-				Priority:    priority,
-				Description: description,
-				Ephemeral:   true,
-				Rig:         rigName, // Ensure MR bead is created in the rig's database (gt-7y7)
-			})
-			if err != nil {
-				// Non-fatal: record the error and skip to notifyWitness.
-				// Push succeeded so branch is on remote, but MR bead failed.
-				// Set mrFailed so the witness knows not to send MERGE_READY.
+			// gt-wrck: Retry MR bead creation to survive transient Dolt write failures.
+			var (
+				mrIssue     *beads.Issue
+				mrCreateErr error
+			)
+			for attempt := 1; attempt <= mrBeadMaxAttempts; attempt++ {
+				mrIssue, mrCreateErr = bd.Create(beads.CreateOptions{
+					Title:       title,
+					Labels:      []string{"gt:merge-request"},
+					Priority:    priority,
+					Description: description,
+					Ephemeral:   true,
+					Rig:         rigName, // Ensure MR bead is created in the rig's database (gt-7y7)
+				})
+				if mrCreateErr == nil {
+					break
+				}
+				if attempt < mrBeadMaxAttempts {
+					delay := time.Duration(attempt) * mrBeadRetryDelay
+					style.PrintWarning("MR bead creation attempt %d/%d failed, retrying in %v: %v", attempt, mrBeadMaxAttempts, delay, mrCreateErr)
+					time.Sleep(delay)
+				}
+			}
+			if mrCreateErr != nil {
+				// All attempts failed — non-fatal but needs human recovery.
+				// Branch is pushed; escalate so the orphan is visible immediately.
 				mrFailed = true
-				errMsg := fmt.Sprintf("MR bead creation failed: %v", err)
+				errMsg := fmt.Sprintf("MR bead creation failed after %d attempts: %v", mrBeadMaxAttempts, mrCreateErr)
 				doneErrors = append(doneErrors, errMsg)
 				style.PrintWarning("%s\nBranch is pushed but MR bead not created. Witness will be notified.", errMsg)
+				emitMRFailedEscalation(issueID, branch, rigName, errMsg)
 				goto notifyWitness
 			}
 			mrID = mrIssue.ID
@@ -1251,6 +1288,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				errMsg := "MR bead creation returned empty ID"
 				doneErrors = append(doneErrors, errMsg)
 				style.PrintWarning("%s\nBranch is pushed but MR bead has no ID. Witness will be notified.", errMsg)
+				emitMRFailedEscalation(issueID, branch, rigName, errMsg)
 				goto notifyWitness
 			}
 
@@ -1258,11 +1296,26 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// bd.Create() succeeds when the bead is written locally, but if the write
 			// didn't persist (Dolt failure, corrupt state), we'd nuke the worktree
 			// with no MR in the queue — losing the polecat's work permanently.
-			if verifiedMR, verifyErr := bd.Show(mrID); verifyErr != nil || verifiedMR == nil {
+			// gt-wrck: Also retry the read-back since a transient read failure orphans work.
+			var mrVerified bool
+			for attempt := 1; attempt <= mrBeadMaxAttempts; attempt++ {
+				verifiedMR, verifyErr := bd.Show(mrID)
+				if verifyErr == nil && verifiedMR != nil {
+					mrVerified = true
+					break
+				}
+				if attempt < mrBeadMaxAttempts {
+					delay := time.Duration(attempt) * mrBeadRetryDelay
+					style.PrintWarning("MR bead verification attempt %d/%d failed (id=%s), retrying in %v: %v", attempt, mrBeadMaxAttempts, mrID, delay, verifyErr)
+					time.Sleep(delay)
+				}
+			}
+			if !mrVerified {
 				mrFailed = true
-				errMsg := fmt.Sprintf("MR bead created but verification read-back failed (id=%s): %v", mrID, verifyErr)
+				errMsg := fmt.Sprintf("MR bead created but verification read-back failed after %d attempts (id=%s)", mrBeadMaxAttempts, mrID)
 				doneErrors = append(doneErrors, errMsg)
 				style.PrintWarning("%s\nBranch is pushed but MR bead not confirmed. Preserving worktree.", errMsg)
+				emitMRFailedEscalation(issueID, branch, rigName, errMsg)
 				goto notifyWitness
 			}
 
